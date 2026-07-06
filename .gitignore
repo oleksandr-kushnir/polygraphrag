@@ -1,0 +1,19 @@
+# Secrets / local config
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.hypothesis/
+*.egg-info/
+
+# Local data / working dirs
+data/
+rag-data/
+*.log

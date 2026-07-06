@@ -1,0 +1,16 @@
+# Test-only dependencies (lightweight).
+#
+# The suite fully mocks RAGAnything, LightRAG, and the Postgres pool, so it runs
+# with NO database, NO API keys, and WITHOUT the heavy `raganything[all]` /
+# `lightrag-hku` stack. These are the only packages needed to import server.py
+# under the test stubs and drive it with a FastAPI test client:
+fastapi
+pydantic
+python-multipart
+numpy
+pyvis
+
+# Test runner
+pytest
+pytest-asyncio
+httpx

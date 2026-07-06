@@ -1,0 +1,22 @@
+PolyGraphRAG
+Copyright (c) 2026 Oleksandr Kushnir
+
+This product is a service layer built on top of the following open-source
+projects, which remain the property of their respective authors:
+
+  - RAG-Anything — https://github.com/HKUDS/RAG-Anything (MIT License)
+      Multimodal document parsing and the RAGAnything ingestion pipeline.
+
+  - LightRAG — https://github.com/HKUDS/LightRAG (MIT License)
+      Knowledge-graph construction, dual-level retrieval, and the Postgres
+      (pgvector + Apache AGE) storage backends.
+
+PolyGraphRAG adds a production FastAPI service around these libraries:
+multi-workspace isolation, asynchronous ingest-job tracking, per-role model
+provider routing, file management, and interactive graph visualization.
+
+The Apache AGE edge-property fix that older deployments carried as a vendored
+patch was contributed upstream by Oleksandr Kushnir
+(https://github.com/oleksandr-kushnir) and merged into LightRAG as
+HKUDS/LightRAG#3052; PolyGraphRAG now relies on it via the pinned lightrag-hku
+version in requirements.txt rather than shipping a patch.

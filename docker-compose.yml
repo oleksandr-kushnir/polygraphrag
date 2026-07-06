@@ -1,0 +1,91 @@
+name: polygraphrag
+
+services:
+  db:
+    build: ./db
+    image: polygraphrag-postgres:local
+    container_name: polygraphrag-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ragdb}
+      POSTGRES_USER: ${POSTGRES_USER:-raguser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # init.sql runs once on an empty data dir: enables pgvector + Apache AGE + pg_trgm.
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    # Bind to loopback only — the DB is never exposed to the LAN.
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-raguser} -d ${POSTGRES_DB:-ragdb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  polygraphrag:
+    build: .
+    image: polygraphrag:local
+    container_name: polygraphrag
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # --- Postgres connection ---
+      # POSTGRES_DB is read by server.py (its own metadata pool); POSTGRES_DATABASE is
+      # the name LightRAG's PG storage layer reads — both must be set to the same value.
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-ragdb}
+      POSTGRES_DATABASE: ${POSTGRES_DB:-ragdb}
+      POSTGRES_USER: ${POSTGRES_USER:-raguser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # POSTGRES_WORKSPACE is deliberately NOT set. If present, LightRAG's process-wide
+      # PostgreSQLDB overrides every per-instance workspace= arg, collapsing all workspaces
+      # onto one and breaking multi-project isolation. Absent, each LightRAG instance keeps
+      # its own workspace and the rag_workspaces registry drives namespacing. server.py
+      # falls back to "default" for the primary workspace's physical name.
+
+      # --- Text LLM: entity/relationship extraction (ingest) ---
+      LLM_MODEL: ${LLM_MODEL:-gpt-5.4-mini}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+
+      # --- Text LLM: query-time keyword extraction + answer synthesis ---
+      # Any QUERY_* left blank falls back to the extraction LLM_* values above.
+      QUERY_LLM_MODEL: ${QUERY_LLM_MODEL:-}
+      QUERY_LLM_BASE_URL: ${QUERY_LLM_BASE_URL:-}
+      QUERY_LLM_API_KEY: ${QUERY_LLM_API_KEY:-}
+
+      # --- Embeddings (pgvector). Model+dim name the vector tables; keep stable. ---
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+
+      # --- Vision (PDF/image extraction) — must be a multimodal model ---
+      VISION_MODEL: ${VISION_MODEL:-gpt-5.4-mini}
+      VISION_BASE_URL: ${VISION_BASE_URL:-}
+      VISION_API_KEY: ${VISION_API_KEY:-}
+
+      # --- Whisper (audio transcription), OpenAI /v1/audio/transcriptions shape ---
+      WHISPER_MODEL: ${WHISPER_MODEL:-whisper-1}
+      WHISPER_BASE_URL: ${WHISPER_BASE_URL:-}
+      WHISPER_API_KEY: ${WHISPER_API_KEY:-}
+
+      # --- Fallback key used by any role whose *_API_KEY is blank ---
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+
+      # --- Behavior ---
+      WORKING_DIR: /app/data
+      MAX_RETRIES: ${MAX_RETRIES:-5}
+      RAG_REQUIRE_GRAPH_EXTRACTION: ${RAG_REQUIRE_GRAPH_EXTRACTION:-true}
+    volumes:
+      - ragdata:/app/data
+    ports:
+      - "127.0.0.1:${RAG_PORT:-9622}:9622"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  ragdata:

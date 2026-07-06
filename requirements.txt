@@ -1,0 +1,21 @@
+# PolyGraphRAG runtime dependencies.
+#
+# lightrag-hku is pinned to a release that already contains the Apache AGE
+# edge-property fix (HKUDS/LightRAG#3052, merged 2026-05-11). Earlier versions
+# silently dropped edge properties on the AGE graph backend and required a
+# vendored patch; that patch is no longer needed. `raganything` depends on
+# lightrag-hku with no upper bound, so this explicit pin wins.
+raganything[all]
+lightrag-hku==1.5.4
+
+# Web layer
+fastapi
+uvicorn[standard]
+python-multipart
+
+# Postgres (pgvector + Apache AGE) storage backend
+asyncpg
+psycopg2-binary
+
+# Interactive knowledge-graph visualization (/workspace/{id}/graph.html)
+pyvis

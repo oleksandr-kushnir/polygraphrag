@@ -1,0 +1,4 @@
+# Normalize line endings to LF — this is a Linux-deployed service.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
