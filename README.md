@@ -71,6 +71,14 @@ curl localhost:9622/health    # -> {"status":"ok"}
 
 Open **http://localhost:9622/docs** for the full interactive Swagger UI.
 
+> **Auth is off by default** (the ports are loopback-only). To require credentials, set
+> `API_TOKENS` in `.env` (comma-separated). Every endpoint except `/health` then needs a token:
+> machines send `-H "Authorization: Bearer <token>"`; in a browser enter any username with the
+> token as the password. Serve over TLS whenever you expose the service beyond loopback.
+>
+> **Scope:** single-instance, low-usage service — run **one worker/replica** (ingest job state
+> is in-process). Not designed for high load or horizontal scaling.
+
 ### Ingest and query (end to end)
 
 ```bash

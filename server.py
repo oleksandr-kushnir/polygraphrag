@@ -1,25 +1,37 @@
 import asyncio
+import base64
 import contextvars
 import hashlib
 import json
 import logging
 import os
 import re
+import secrets
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
+def _log_level_from_env(value: str | None) -> int:
+    """Map a LOG_LEVEL env string to a logging constant; unknown/empty -> INFO (never crash
+    the process on a typo). Case-insensitive; surrounding whitespace is ignored."""
+    return getattr(logging, (value or "INFO").strip().upper(), logging.INFO)
+
+
+# One knob for all logging. Default INFO keeps LightRAG / RAG-Anything DEBUG-level output —
+# which can include prompt and document content — out of the logs; set LOG_LEVEL=DEBUG to opt
+# into full verbosity for troubleshooting. The noisy third-party loggers are intentionally NOT
+# pinned here: without an explicit level they inherit root's LOG_LEVEL (single source of truth).
+LOG_LEVEL = _log_level_from_env(os.getenv("LOG_LEVEL"))
 logging.basicConfig(
-    level=logging.INFO,
+    level=LOG_LEVEL,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-logging.getLogger("raganything").setLevel(logging.DEBUG)
-logging.getLogger("lightrag").setLevel(logging.DEBUG)
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi import Path as PathParam  # aliased: `Path` is pathlib.Path throughout this module
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 from raganything import RAGAnything
 
@@ -130,6 +142,13 @@ POSTGRES_USER = os.getenv("POSTGRES_USER", "raguser")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")
 POSTGRES_WORKSPACE = os.getenv("POSTGRES_WORKSPACE", "default")
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
+# --- API auth (opt-in) ---
+# Comma-separated bearer tokens. Blank => auth disabled (the loopback/dev default, so the
+# existing local workflow and the test suite need no credentials). When set, every endpoint
+# except /health requires a matching token, sent either as `Authorization: Bearer <token>`
+# (machines) or via HTTP Basic with the token as the password (browsers). Read live so tests
+# can monkeypatch it, mirroring the _active_llm_cfg() idiom above.
+API_TOKENS = [t.strip() for t in os.getenv("API_TOKENS", "").split(",") if t.strip()]
 # Ingestion-integrity guard: after ainsert returns, confirm LightRAG actually finished
 # (doc_status == 'processed', and — when content is non-trivial — that it produced graph
 # entities). The pipeline marks a doc FAILED on extraction error but ainsert does NOT re-raise,
@@ -962,10 +981,65 @@ app = FastAPI(
         "Documents are ingested per **workspace** (an isolated knowledge graph + vector index); "
         "each workspace is addressed by its public slug id under `/workspace/{workspace_id}/...`. "
         "Upload files, query the corpus (with citations), or render the knowledge graph as an "
-        "interactive HTML page. All ports are loopback-only."
+        "interactive HTML page.\n\n"
+        "**Scope:** a single-instance, low-usage service — run exactly one worker/replica "
+        "(ingest job state is in-process); it is not designed for high load or horizontal "
+        "scaling. **Auth:** disabled by default (ports are loopback-only). Set `API_TOKENS` "
+        "to require a token on every endpoint except `/health` — send it as "
+        "`Authorization: Bearer <token>`, or in a browser use any username with the token as "
+        "the password. Serve over TLS whenever the service is exposed beyond loopback."
     ),
     lifespan=lifespan,
 )
+
+
+# --- Auth (opt-in via API_TOKENS) ---
+
+def _auth_enabled() -> bool:
+    """True when at least one API token is configured (read live so tests can toggle it)."""
+    return bool(API_TOKENS)
+
+
+def _token_valid(token: str) -> bool:
+    """Constant-time membership check against the configured tokens."""
+    return any(secrets.compare_digest(token, t) for t in API_TOKENS)
+
+
+def _extract_credential(header: str) -> str | None:
+    """Pull the presented secret out of an Authorization header, supporting both transports:
+    `Bearer <token>` (machines) and `Basic <base64(user:pass)>` (browsers — the token is the
+    password, username is ignored). Returns None if the header is absent/malformed."""
+    if not header:
+        return None
+    scheme, _, rest = header.partition(" ")
+    scheme = scheme.lower()
+    if scheme == "bearer":
+        return rest.strip() or None
+    if scheme == "basic":
+        try:
+            decoded = base64.b64decode(rest.strip()).decode("utf-8", "replace")
+        except (ValueError, TypeError):
+            return None
+        _, sep, password = decoded.partition(":")
+        return password if sep else None
+    return None
+
+
+@app.middleware("http")
+async def _require_auth(request: Request, call_next):
+    """Gate every request behind API_TOKENS when auth is enabled. Applied as middleware (not a
+    route dependency) so it also covers the auto-generated /docs, /redoc and /openapi.json.
+    /health stays open for liveness probes. A 401 carries `WWW-Authenticate: Basic` so browsers
+    show a native login prompt and then auto-attach the credentials to same-origin requests."""
+    if _auth_enabled() and request.url.path != "/health":
+        cred = _extract_credential(request.headers.get("authorization", ""))
+        if not (cred and _token_valid(cred)):
+            return JSONResponse(
+                {"detail": "Unauthorized"},
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="PolyGraphRAG"'},
+            )
+    return await call_next(request)
 
 
 # --- Helpers ---
@@ -982,31 +1056,49 @@ def _batch_response(batch_id: str, entries: list[dict]) -> dict:
     return {"batch_id": batch_id, "summary": _batch_summary(entries), "jobs": entries}
 
 
+def _internal_error(exc: Exception, context: str) -> HTTPException:
+    """Log the real error server-side (with traceback) and return a client-safe generic 500.
+    Keeps internal exception text — which can reveal implementation/query details — out of the
+    HTTP response. Use as `raise _internal_error(exc, "query")`."""
+    logging.exception("%s failed: %s", context, exc)
+    return HTTPException(500, "Internal server error")
+
+
 # --- API ---
 
 _MODE_DESC = (
     "Retrieval mode: 'mix' (default, graph + vector — recommended), 'local' (entity-centric), "
     "'global' (relationship/theme-centric), 'hybrid' (local + global), or 'naive' (plain vector search)."
 )
+# Constrain mode to the modes LightRAG actually supports: an unknown value is rejected with a
+# 422 up front instead of being passed through to fail (or misbehave) deep in retrieval.
+QueryMode = Literal["mix", "local", "global", "hybrid", "naive"]
+# Upper bound on top_k: the default is 40; a very large value multiplies retrieval + LLM cost,
+# so a single request can't (accidentally or maliciously) run the corpus/LLM budget away.
+_TOP_K_MAX = 1000
 
 
 class QueryRequest(BaseModel):
     query: str = Field(description="The natural-language question to ask the workspace's corpus.",
                        examples=["What did the Q3 report say about churn?"])
-    mode: str = Field("mix", description=_MODE_DESC)
+    mode: QueryMode = Field("mix", description=_MODE_DESC)
     include_references: bool = Field(
         True, description="Include source-document citations in the response. Default true.")
     # LightRAG's tuned default (entities/relations retrieved per keyword set).
-    top_k: int = Field(40, description="Entities/relationships retrieved per keyword set. Default 40.")
+    top_k: int = Field(
+        40, ge=1, le=_TOP_K_MAX,
+        description=f"Entities/relationships retrieved per keyword set. Default 40, max {_TOP_K_MAX}.")
 
 
 class QueryDataRequest(BaseModel):
     query: str = Field(description="The natural-language question used to retrieve graph/vector data.",
                        examples=["List the entities related to onboarding."])
-    mode: str = Field("mix", description=_MODE_DESC)
+    mode: QueryMode = Field("mix", description=_MODE_DESC)
     include_references: bool = Field(
         True, description="Resolve and include source-document references for retrieved data. Default true.")
-    top_k: int = Field(40, description="Entities/relationships retrieved per keyword set. Default 40.")
+    top_k: int = Field(
+        40, ge=1, le=_TOP_K_MAX,
+        description=f"Entities/relationships retrieved per keyword set. Default 40, max {_TOP_K_MAX}.")
     file_path_contains: list[str] = Field(
         default_factory=list,
         description=(
@@ -1618,7 +1710,7 @@ async def delete_file(body: FileDeleteRequest, ws: dict = Depends(require_worksp
         try:
             await rag_instance.lightrag.adelete_by_doc_id(doc_id, delete_llm_cache=True)
         except Exception as exc:
-            raise HTTPException(500, f"delete failed for {doc_id}: {exc}") from exc
+            raise _internal_error(exc, f"delete of doc {doc_id}") from exc
     # Drop the index row(s) and any leftover raw file.
     await _db_pool.execute("DELETE FROM rag_file_metadata WHERE workspace=$1 AND doc_id=$2", phys, doc_id)
     if meta and meta.get("job_id") and meta.get("file"):
@@ -1648,7 +1740,7 @@ async def query(req: QueryRequest, ws: dict = Depends(require_workspace)):
             ),
         )
     except Exception as exc:
-        raise HTTPException(500, str(exc)) from exc
+        raise _internal_error(exc, "query") from exc
 
     result = (raw.get("llm_response") or {}).get("content", "")
     references = []
@@ -1689,7 +1781,7 @@ async def query_data(req: QueryDataRequest, ws: dict = Depends(require_workspace
             param=_query_param(QueryParam, mode=req.mode, top_k=top_k, chunk_top_k=chunk_top_k),
         )
     except Exception as exc:
-        raise HTTPException(500, str(exc)) from exc
+        raise _internal_error(exc, "query/data") from exc
 
     data = raw.get("data") or {}
     if needles:
@@ -1776,7 +1868,7 @@ async def graph_html(
             node_label=node_label, max_depth=max_depth, max_nodes=fetch_nodes,
         )
     except Exception as exc:
-        raise HTTPException(500, str(exc)) from exc
+        raise _internal_error(exc, "graph.html") from exc
     if file_path_contains:
         kg.nodes = [
             n for n in kg.nodes

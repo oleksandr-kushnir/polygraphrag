@@ -88,6 +88,26 @@ Any `QUERY_LLM_*` variable left blank falls back to the corresponding `LLM_*` va
 | `MAX_RETRIES` | `5` | Ingestion retry budget. |
 | `RAG_REQUIRE_GRAPH_EXTRACTION` | `true` | Fail an ingest if a non-trivial document produced zero graph entities. |
 | `RAG_PORT` | `9622` | Host port for the API (loopback). |
+| `API_TOKENS` | _(empty ⇒ no auth)_ | Comma-separated tokens gating every endpoint except `/health`. See **Auth** below. |
+| `LOG_LEVEL` | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR`. `DEBUG` logs LightRAG/RAG-Anything prompt + document content — keep at `INFO` normally. |
+
+## Auth
+
+Auth is **opt-in**. With `API_TOKENS` empty (the default) there is no authentication — safe
+only because the ports are bound to loopback. Set one or more comma-separated tokens to require
+credentials on **every endpoint except `/health`**:
+
+- **Machines / scripts:** `Authorization: Bearer <token>`.
+- **Browsers** (`/docs`, `graph.html`): the browser shows a native login prompt — enter **any
+  username** and the **token as the password** (it's then auto-attached to Swagger "Try it out").
+
+Any valid token in the list is accepted. **Serve over TLS whenever the service is exposed beyond
+loopback** — a bearer token over plain HTTP travels in the clear. For real per-user accounts or
+SSO, terminate that at a reverse proxy in front of the app; the app's tokens still protect direct
+access.
+
+> **Scope:** this is a single-instance, low-usage service. Run **exactly one worker/replica** —
+> ingest job state lives in-process. It is not designed for high load or horizontal scaling.
 
 ## Worked example — DeepSeek + OpenAI
 

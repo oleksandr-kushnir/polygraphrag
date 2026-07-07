@@ -4,6 +4,15 @@ Base URL in the default deployment: `http://localhost:9622`. Every endpoint is a
 
 All request/response bodies are JSON unless noted. File uploads use `multipart/form-data`.
 
+## Authentication
+
+Auth is opt-in via the `API_TOKENS` env var. When it is empty (default), no credentials are
+required (the ports are loopback-only). When set, **every endpoint except `GET /health`** requires
+a token, sent either as `Authorization: Bearer <token>` (machines) or via HTTP Basic with any
+username and the token as the password (browsers, for `/docs` and `graph.html`). A missing/invalid
+token returns `401` with a `WWW-Authenticate: Basic` challenge. Use TLS when exposed beyond
+loopback.
+
 ---
 
 ## Health

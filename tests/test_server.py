@@ -124,8 +124,11 @@ def reset_server_state():
     rag_stub.lightrag.aget_docs_by_ids.return_value = _AnyKeyDocs()
     rag_stub.lightrag.adelete_by_doc_id.reset_mock()
     rag_stub.process_document_complete.reset_mock()
+    # Auth is opt-in; ensure no test leaks an enforced token list into the next.
+    server.API_TOKENS = []
     yield
     server._db_pool = None
+    server.API_TOKENS = []
 
 
 # Default public workspace used by data-endpoint tests (maps to physical 'default').
@@ -2441,3 +2444,140 @@ async def test_transcribe_audio_routes_and_uses_configured_model(tmp_path, monke
     assert captured["init"] == {"api_key": "whisper-key", "base_url": "http://local-whisper:9000/v1"}
     assert captured["transcribe"]["model"] == "faster-whisper-large-v3"
     assert out == "transcript text"
+
+
+# --------------------------------------------------------------------------- #
+# Token auth (API_TOKENS) — opt-in, Bearer for machines / Basic for browsers
+# --------------------------------------------------------------------------- #
+
+def _basic_header(username: str, password: str) -> str:
+    import base64
+    return "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode()
+
+
+@pytest.mark.asyncio
+async def test_auth_disabled_by_default_allows(client):
+    # No API_TOKENS configured (the default) => no auth, unchanged behaviour.
+    resp = await client.post(f"{WS}/query", json={"query": "test"})
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_missing_credentials_401(client):
+    server.API_TOKENS = ["testtok"]
+    resp = await client.post(f"{WS}/query", json={"query": "test"})
+    assert resp.status_code == 401
+    # Browsers rely on this to show a native login prompt.
+    assert resp.headers.get("www-authenticate", "").startswith("Basic")
+
+
+@pytest.mark.asyncio
+async def test_valid_bearer_200(client):
+    server.API_TOKENS = ["testtok"]
+    resp = await client.post(
+        f"{WS}/query", json={"query": "test"},
+        headers={"Authorization": "Bearer testtok"},
+    )
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_valid_basic_token_as_password_200(client):
+    # Humans in a browser: any username + the token as the password.
+    server.API_TOKENS = ["testtok"]
+    resp = await client.post(
+        f"{WS}/query", json={"query": "test"},
+        headers={"Authorization": _basic_header("anyone", "testtok")},
+    )
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_wrong_token_401(client):
+    server.API_TOKENS = ["testtok"]
+    resp = await client.post(
+        f"{WS}/query", json={"query": "test"},
+        headers={"Authorization": "Bearer wrong"},
+    )
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_health_open_when_auth_enabled(client):
+    server.API_TOKENS = ["testtok"]
+    resp = await client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_docs_protected_when_auth_enabled(client):
+    # The whole API is gated, including the auto-generated OpenAPI schema/docs.
+    server.API_TOKENS = ["testtok"]
+    resp = await client.get("/openapi.json")
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_multiple_tokens_each_valid(client):
+    server.API_TOKENS = ["tok1", "tok2"]
+    for tok in ("tok1", "tok2"):
+        resp = await client.post(
+            f"{WS}/query", json={"query": "test"},
+            headers={"Authorization": f"Bearer {tok}"},
+        )
+        assert resp.status_code == 200
+
+
+# --------------------------------------------------------------------------- #
+# Low-hanging hardening — error hygiene, log level, input bounds
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_internal_error_not_leaked_to_client(client):
+    # A raw upstream exception must not appear in the 500 body.
+    rag_stub.lightrag.aquery_data.side_effect = RuntimeError("secret internal detail")
+    try:
+        resp = await client.post(f"{WS}/query/data", json={"query": "test"})
+    finally:
+        rag_stub.lightrag.aquery_data.side_effect = None
+    assert resp.status_code == 500
+    body = resp.text
+    assert "secret internal detail" not in body
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("DEBUG", logging.DEBUG),
+    ("info", logging.INFO),
+    (None, logging.INFO),
+    ("", logging.INFO),
+    ("bogus", logging.INFO),
+    ("WARNING", logging.WARNING),
+    ("  Error  ", logging.ERROR),
+])
+def test_log_level_from_env(value, expected):
+    assert server._log_level_from_env(value) == expected
+
+
+@pytest.mark.asyncio
+async def test_query_invalid_mode_422(client):
+    resp = await client.post(f"{WS}/query", json={"query": "test", "mode": "bogus"})
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_query_top_k_over_ceiling_422(client):
+    resp = await client.post(f"{WS}/query", json={"query": "test", "top_k": 100000})
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_query_top_k_at_ceiling_ok(client):
+    resp = await client.post(f"{WS}/query", json={"query": "test", "top_k": 1000})
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_query_data_invalid_mode_422(client):
+    resp = await client.post(f"{WS}/query/data", json={"query": "test", "mode": "bogus"})
+    assert resp.status_code == 422

@@ -80,6 +80,13 @@ services:
       WORKING_DIR: /app/data
       MAX_RETRIES: ${MAX_RETRIES:-5}
       RAG_REQUIRE_GRAPH_EXTRACTION: ${RAG_REQUIRE_GRAPH_EXTRACTION:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+      # --- API auth (opt-in) ---
+      # Blank => no auth (relies on the loopback port binding below). Set when exposing
+      # the service; machines use `Authorization: Bearer <token>`, browsers use Basic
+      # (any username + token as password). Every endpoint except /health is gated.
+      API_TOKENS: ${API_TOKENS:-}
     volumes:
       - ragdata:/app/data
     ports:
