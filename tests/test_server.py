@@ -1419,6 +1419,49 @@ async def test_graph_html_file_path_filter(client):
 
 
 @pytest.mark.asyncio
+async def test_graph_html_node_file_paths_resolved_no_key_leak(client):
+    """Graph node file_path (shown in tooltips) must be resolved to the REAL Postgres path, and
+    the folder filter must match that real path — never LightRAG's internal {job_id}_ key."""
+    server._db_pool = _mock_pool
+    _mock_pool.fetch.reset_mock()
+    _mock_pool.fetch.return_value = [
+        _meta_row("aa11beef_overview.txt", "/corpus/helix/docs/overview.txt", "overview.txt"),
+    ]
+    _mock_pool.fetch.return_value = [
+        _meta_row("aa11beef_overview.txt", "/corpus/helix/docs/overview.txt", "overview.txt"),
+        _meta_row("bb22cafe_memo.txt", "/corpus/helix/docs/memo.txt", "memo.txt"),
+    ]
+    kg = SimpleNamespace(
+        nodes=[
+            SimpleNamespace(
+                id="helix_node",
+                properties={"file_path": "aa11beef_overview.txt", "entity_id": "helix_node"},
+                labels=["E"]),
+            SimpleNamespace(
+                id="memo_node",
+                properties={"file_path": "bb22cafe_memo.txt", "entity_id": "memo_node"},
+                labels=["E"]),
+        ],
+        # edge tooltip carries a multi-source <SEP>-joined internal-key file_path too
+        edges=[SimpleNamespace(source="helix_node", target="memo_node",
+                               properties={"file_path": "aa11beef_overview.txt<SEP>bb22cafe_memo.txt"})],
+    )
+    gkg = AsyncMock(return_value=kg)
+    orig = rag_stub.lightrag.get_knowledge_graph
+    rag_stub.lightrag.get_knowledge_graph = gkg
+    try:
+        resp = await client.get(f"{WS}/graph.html")
+    finally:
+        rag_stub.lightrag.get_knowledge_graph = orig
+    assert resp.status_code == 200
+    assert "helix_node" in resp.text                      # rendered
+    assert "/corpus/helix/docs/overview.txt" in resp.text  # real path in a tooltip
+    # internal {job_id}_ keys never rendered anywhere (nodes OR edges)
+    assert "aa11beef_" not in resp.text and "bb22cafe_" not in resp.text
+    _mock_pool.fetch.return_value = []
+
+
+@pytest.mark.asyncio
 async def test_graph_html_no_filter_no_boost(client):
     kg = SimpleNamespace(
         nodes=[SimpleNamespace(id="n1", properties={"entity_id": "n1"}, labels=["E"])],

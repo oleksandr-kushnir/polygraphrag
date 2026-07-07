@@ -795,36 +795,51 @@ def _graph_field_sep() -> str:
     return "<SEP>"
 
 
+def _resolve_joined_path(value: str, meta_map: dict[str, dict], sep: str) -> str:
+    """Resolve a (possibly GRAPH_FIELD_SEP-joined) list of LightRAG keys to real document paths,
+    preserving the SEP structure. Each segment maps to its rag_file_metadata `file_path`; an
+    unresolved segment falls back to a prefix-stripped basename so no `{job_id}_` token surfaces."""
+    return sep.join(
+        ((meta_map.get(s.strip()) or {}).get("file_path") or _strip_job_prefix(s.strip()))
+        for s in value.split(sep) if s.strip())
+
+
 async def _resolve_block_file_paths(data: dict, phys: str | None) -> None:
     """Rewrite LightRAG's internal citation keys in entity/relationship/chunk `file_path` fields to
     the REAL document path from Postgres (same `rag_file_metadata` join as references), so the raw
-    `{job_id}_{basename}` key never surfaces in `/query/data`. Each field may be a GRAPH_FIELD_SEP-
-    joined list of keys for multi-source entities/relationships; every segment is resolved and the
-    SEP structure preserved. An unresolved segment falls back to a prefix-stripped basename so no
-    `{job_id}_` token / hex ever leaks. Mutates `data` in place."""
+    `{job_id}_{basename}` key never surfaces in `/query/data`. Multi-source fields are GRAPH_FIELD_
+    SEP-joined lists; every segment is resolved and the SEP structure preserved. Mutates in place."""
     sep = _graph_field_sep()
     blocks = [data.get("entities") or [], data.get("relationships") or [], data.get("chunks") or []]
-    keys: set[str] = set()
-    for block in blocks:
-        for item in block:
-            for seg in (item.get("file_path") or "").split(sep):
-                if seg.strip():
-                    keys.add(seg.strip())
+    keys = {s.strip() for block in blocks for item in block
+            for s in (item.get("file_path") or "").split(sep) if s.strip()}
     if not keys:
         return
     meta_map = await _db_fetch_metadata_by_key(_db_pool, list(keys), phys) if _db_pool else {}
-
-    def _real(seg: str) -> str:
-        row = meta_map.get(seg)
-        return (row.get("file_path") if row else None) or _strip_job_prefix(seg)
-
     for block in blocks:
         for item in block:
             fp = item.get("file_path")
-            if not fp:
-                continue
-            item["file_path"] = sep.join(
-                _real(seg.strip()) for seg in fp.split(sep) if seg.strip())
+            if fp:
+                item["file_path"] = _resolve_joined_path(fp, meta_map, sep)
+
+
+async def _resolve_graph_paths(elements, phys: str | None) -> None:
+    """Same real-path resolution as `_resolve_block_file_paths`, for knowledge-graph nodes AND
+    edges whose `properties['file_path']` (shown in graph.html tooltips and used by its file_path
+    filter) is a GRAPH_FIELD_SEP-joined list of internal keys. Both nodes and relationships carry
+    source lists, so pass them together for a single DB fetch. Mutates properties in place."""
+    sep = _graph_field_sep()
+    keys = {s.strip() for el in elements
+            for s in ((el.properties or {}).get("file_path") or "").split(sep) if s.strip()}
+    if not keys:
+        return
+    meta_map = await _db_fetch_metadata_by_key(_db_pool, list(keys), phys) if _db_pool else {}
+    for el in elements:
+        props = el.properties or {}
+        fp = props.get("file_path")
+        if fp:
+            props["file_path"] = _resolve_joined_path(fp, meta_map, sep)
+            el.properties = props
 
 
 async def _build_references(
@@ -2052,6 +2067,10 @@ async def graph_html(
         )
     except Exception as exc:
         raise _internal_error(exc, "graph.html") from exc
+    # Resolve node + edge file_path (internal keys) -> real Postgres paths before filtering/
+    # rendering, so tooltips never show LightRAG's internal name and the folder filter matches the
+    # real path. Nodes and edges share one fetch.
+    await _resolve_graph_paths(list(kg.nodes) + list(kg.edges), ws["lightrag_workspace"])
     if needles:
         kg.nodes = [
             n for n in kg.nodes
