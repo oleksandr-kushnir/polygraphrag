@@ -15,6 +15,35 @@ PolyGraphRAG wraps [RAG-Anything](https://github.com/HKUDS/RAG-Anything) and [Li
 
 ---
 
+## 📥 Drop in any file → a GraphRAG database (embeddings + knowledge graph)
+
+**No separate OCR service. No parsing pipeline to wire up. No extraction stack to babysit.** One upload endpoint swallows documents, images, and audio alike — OCR, layout parsing, transcription, and entity extraction all happen **inside this one service**. Whatever you send comes out the other side as a **GraphRAG store in Postgres: vector embeddings in pgvector *and* an entity/relationship knowledge graph in Apache AGE**, both queryable together. **22 first-class, verified file types**, and unknown extensions are still attempted (routed through MinerU, ingestion unverified).
+
+| Category | How it's parsed | Extensions |
+|----------|-----------------|------------|
+| 📄 **Documents** | Vision model (Office → PDF via LibreOffice) | `pdf` · `docx` · `pptx` · `xlsx` |
+| 🖼️ **Images** | Vision model, per file | `jpg` · `jpeg` · `png` · `gif` · `bmp` · `tiff` · `webp` |
+| 🔊 **Audio** | Whisper transcription | `mp3` · `wav` · `m4a` · `ogg` · `flac` · `opus` · `webm` |
+| 📝 **Text** | Ingested directly | `md` · `txt` · `csv` · `html` |
+
+**One pipeline, one store, one query surface.** The extracted text is embedded into **pgvector** for semantic retrieval, and its entities/relationships are lifted into an **Apache AGE knowledge graph** — so queries traverse both the vectors *and* the graph, not just chunk similarity. Point it at a PDF, a screenshot, a spreadsheet, or a voice memo; the plumbing is already done.
+
+---
+
+## 🔀🤖 The perfect memory & knowledge backend for n8n workflows and AI agents
+
+**Pure API, built for automators — every feature is an endpoint you can call.** No app to adopt, no dashboard to learn: you get a clean, fully-documented API plus a **Swagger UI** at `/docs` to explore and test it, and an interactive **graph viewer** you can fetch as HTML and drop straight into your own app or agent UI when you want to show the knowledge graph. It's exactly what you want when the "user" is a workflow or an agent — nothing between you and the automation.
+
+**It's just HTTP + bearer auth — no SDK, no client library, no glue code.** Every capability is a plain REST call, so it drops straight into an **n8n HTTP Request node** or an **AI agent tool** with zero adapters:
+
+- **Ingest** — wire a Google Drive / Gmail / webhook trigger straight into `POST /workspace/{id}/upload/batch`. Your automation feeds files in; PolyGraphRAG does the OCR, parsing, transcription, and graph-building.
+- **Query as a tool** — give your agent `POST /workspace/{id}/query` for a synthesized answer, or `POST /workspace/{id}/query/data` for **structured evidence with no LLM answer** — ideal when the agent wants raw facts to reason over instead of prose.
+- **Isolate per client/topic** — one workspace per project means an n8n workflow or a multi-tenant agent can keep every knowledge base cleanly separated on a single deployment.
+
+Retrieval-augmented n8n flows and tool-calling agents get a **multimodal, graph-aware knowledge store behind a single URL** — point your workflow at it and ship.
+
+---
+
 ## Why it's interesting
 
 - 🗂️ **Multi-project — multiple isolated knowledge graphs.** Every *workspace* is its own graph **and** its own vector namespace. Spin up as many projects as you like on a single deployment and ingest, query, and visualize each one completely independently. No cross-talk between corpora.
@@ -103,6 +132,8 @@ curl -X POST localhost:9622/workspace/acme/query \
 # 5. Open the interactive graph in a browser
 #    http://localhost:9622/workspace/acme/graph.html
 ```
+
+**Citations point at your real files.** Upload with `source_path` + `path_root` metadata and every `/query` reference's `file_path` is the **real, openable document path** you provided (resolved from Postgres, not LightRAG's internal name) — so answers cite files your own tooling can open.
 
 ## API at a glance
 

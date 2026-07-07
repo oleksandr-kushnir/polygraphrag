@@ -832,15 +832,18 @@ async def test_query_references_parsed_from_aquery_llm(client):
     assert data["result"] == "answer text"
     refs = data["references"]
     assert len(refs) == 2
-    # file_path = the Hermes-openable source path; file_name = basename; metadata null without a DB row.
+    # Unresolvable references (no metadata row): file_path/file_name are null — we NEVER echo
+    # LightRAG's raw internal value. reference_id + answering model are still present.
     assert refs[0]["reference_id"] == "1"
-    assert refs[0]["file_path"] == "/opt/data/workspace/Tag_1.pdf"
-    assert refs[0]["file_name"] == "Tag_1.pdf"
+    assert refs[0]["file_path"] is None
+    assert refs[0]["file_name"] is None
     assert refs[0]["file_description"] is None and refs[0]["job_id"] is None
     assert "source_path" not in refs[0]
     assert refs[0]["llm_model_extracted"] is None  # no DB row -> unknown extractor
     assert refs[0]["llm_model_answered"] == server.QUERY_LLM_MODEL  # /query reports the query-time answering model
-    assert refs[1]["file_name"] == "Tag_2.pdf"
+    # The internal LightRAG key must not appear anywhere in the reference payload.
+    assert "lightrag_key" not in refs[0]
+    assert "Tag_1.pdf" not in str(refs[0])
 
 
 @pytest.mark.asyncio
@@ -886,7 +889,9 @@ async def test_query_references_unknown_format(client):
     resp = await client.post(f"{WS}/query", json={"query": "test"})
     ref = resp.json()["references"][0]
     assert ref["job_id"] is None
-    assert ref["file_name"] == "nodash.pdf"
+    # No metadata row -> unresolved; never surface LightRAG's internal name.
+    assert ref["file_name"] is None
+    assert ref["file_path"] is None
 
 
 @pytest.mark.asyncio
@@ -988,7 +993,8 @@ async def test_query_references_enriched_from_db(client):
     _mock_pool.fetch.reset_mock()
     _mock_pool.fetch.return_value = [
         {
-            "file_path": "/opt/data/workspace/Tag_1.pdf",
+            "lightrag_key": "20ed9a7c_Tag_1.pdf",   # what LightRAG returns; JOIN key
+            "file_path": "/opt/data/workspace/Tag_1.pdf",   # real display path
             "file": "Tag_1.pdf",
             "job_id": "20ed9a7c",
             "description": "Q1 strategy",
@@ -1000,14 +1006,15 @@ async def test_query_references_enriched_from_db(client):
     ]
     rag_stub.lightrag.aquery_llm.return_value = {
         "status": "success",
-        "data": {"references": [{"reference_id": "1", "file_path": "/opt/data/workspace/Tag_1.pdf"}]},
+        # LightRAG returns its internal citation key (the basename); we resolve it to the real path.
+        "data": {"references": [{"reference_id": "1", "file_path": "20ed9a7c_Tag_1.pdf"}]},
         "llm_response": {"content": "answer", "is_streaming": False},
         "metadata": {},
     }
     resp = await client.post(f"{WS}/query", json={"query": "test"})
     assert resp.status_code == 200
     ref = resp.json()["references"][0]
-    assert ref["file_path"] == "/opt/data/workspace/Tag_1.pdf"  # Hermes-openable path
+    assert ref["file_path"] == "/opt/data/workspace/Tag_1.pdf"  # resolved real, openable path
     assert ref["file_name"] == "Tag_1.pdf"
     assert ref["file_description"] == "Q1 strategy"
     assert "source_path" not in ref  # dropped from references
@@ -1038,6 +1045,48 @@ async def test_query_references_null_when_no_db_record(client):
     assert ref["uploaded_at"] is None
     assert ref["llm_model_extracted"] is None  # no DB row -> unknown extractor
     assert ref["llm_model_answered"] == server.QUERY_LLM_MODEL  # answering model present regardless of DB row
+
+
+@pytest.mark.asyncio
+async def test_query_answer_prose_rewrites_internal_keys(client):
+    """LightRAG embeds its internal citation key in the answer's `### References` prose; we must
+    rewrite it to the clean filename (resolved) or a prefix-stripped basename (unresolved) so no
+    `{job_id}_` token / hex ever surfaces in the answer text — mirroring the structured refs."""
+    server._db_pool = _mock_pool
+    _mock_pool.fetch.reset_mock()
+    _mock_pool.fetch.return_value = [
+        {
+            "lightrag_key": "20ed9a7c_Tag_1.pdf",
+            "file_path": "/opt/data/workspace/reports/Tag_1.pdf",
+            "file": "sub/Tag_1.pdf",   # original had a dir part; prose shows the basename
+            "job_id": "20ed9a7c",
+            "description": "Q1",
+            "source_path": "sub/Tag_1.pdf",
+            "last_modified_time": None,
+            "uploaded_at": None,
+            "llm_model_extracted": "m",
+        }
+    ]
+    rag_stub.lightrag.aquery_llm.return_value = {
+        "status": "success",
+        "data": {"references": [
+            {"reference_id": "1", "file_path": "20ed9a7c_Tag_1.pdf"},      # resolved
+            {"reference_id": "2", "file_path": "beefcafe_notes.txt"},      # unresolved (no row)
+        ]},
+        "llm_response": {
+            "content": "See sources.\n\n### References\n- [1] 20ed9a7c_Tag_1.pdf\n- [2] beefcafe_notes.txt",
+            "is_streaming": False,
+        },
+        "metadata": {},
+    }
+    resp = await client.post(f"{WS}/query", json={"query": "test"})
+    assert resp.status_code == 200
+    result = resp.json()["result"]
+    assert "20ed9a7c_Tag_1.pdf" not in result   # resolved internal key gone
+    assert "beefcafe_notes.txt" not in result    # unresolved key's hex prefix gone
+    assert "[1] Tag_1.pdf" in result             # resolved -> clean basename
+    assert "[2] notes.txt" in result             # unresolved -> {job_id}_ prefix stripped
+    _mock_pool.fetch.return_value = []
 
 
 @pytest.mark.asyncio
@@ -1100,7 +1149,8 @@ async def test_query_data_references_parsed_and_enriched(client):
     _mock_pool.fetch.reset_mock()
     _mock_pool.fetch.return_value = [
         {
-            "file_path": "/opt/data/workspace/Tag_1.pdf",
+            "lightrag_key": "20ed9a7c_Tag_1.pdf",   # what LightRAG returns; JOIN key
+            "file_path": "/opt/data/workspace/Tag_1.pdf",   # real display path
             "file": "Tag_1.pdf",
             "job_id": "20ed9a7c",
             "description": "Q1 strategy",
@@ -1115,7 +1165,7 @@ async def test_query_data_references_parsed_and_enriched(client):
         "message": "ok",
         "data": {
             "entities": [], "relationships": [], "chunks": [],
-            "references": [{"reference_id": "1", "file_path": "/opt/data/workspace/Tag_1.pdf"}],
+            "references": [{"reference_id": "1", "file_path": "20ed9a7c_Tag_1.pdf"}],
         },
         "metadata": {},
     }
@@ -1222,6 +1272,18 @@ def test_path_matches_any_sep_joined_list():
 
 @pytest.mark.asyncio
 async def test_query_data_file_path_filter_or(client):
+    # References resolve to their real path via Postgres; provide rows so the two refs map to
+    # real paths (the reference post-filter runs on the resolved real path).
+    server._db_pool = _mock_pool
+    _mock_pool.fetch.reset_mock()
+    _mock_pool.fetch.return_value = [
+        {"lightrag_key": "/opt/data/workspace/career/cv.pdf", "file_path": "/opt/data/workspace/career/cv.pdf",
+         "file": "cv.pdf", "job_id": None, "description": None, "source_path": None,
+         "last_modified_time": None, "uploaded_at": None, "llm_model_extracted": None},
+        {"lightrag_key": "/opt/data/workspace/finance/tax.pdf", "file_path": "/opt/data/workspace/finance/tax.pdf",
+         "file": "tax.pdf", "job_id": None, "description": None, "source_path": None,
+         "last_modified_time": None, "uploaded_at": None, "llm_model_extracted": None},
+    ]
     rag_stub.lightrag.aquery_data.return_value = {
         "status": "success",
         "message": "ok",
@@ -1255,6 +1317,7 @@ async def test_query_data_file_path_filter_or(client):
     assert [r["tgt_id"] for r in data["relationships"]] == ["B"]  # the /projects/ rel
     assert [c["content"] for c in data["chunks"]] == ["c1"]
     assert [r["file_path"] for r in data["references"]] == ["/opt/data/workspace/career/cv.pdf"]
+    _mock_pool.fetch.return_value = []  # restore default
 
 
 @pytest.mark.asyncio
@@ -1359,7 +1422,7 @@ async def test_batch_json_metadata_per_file(tmp_path, client):
         )
     assert resp.status_code == 200
     # INSERT args: (sql, job_id, batch_id, workspace, file, description, source_path,
-    #               last_modified_time, content_hash, file_path, llm_model_extracted)
+    #               last_modified_time, content_hash, file_path, lightrag_key, llm_model_extracted)
     insert_calls = [c for c in _mock_pool.execute.call_args_list if "INSERT INTO rag_file_metadata" in str(c)]
     assert len(insert_calls) == 2
     args0 = insert_calls[0].args
@@ -1369,7 +1432,9 @@ async def test_batch_json_metadata_per_file(tmp_path, client):
     assert descs == {"Desc A", "Desc B"}
     srcs = {args0[6], args1[6]}
     assert srcs == {"/src/A.txt", "/src/B.txt"}
-    assert args0[10] == server.LLM_MODEL and args1[10] == server.LLM_MODEL  # extractor captured at ingest
+    # lightrag_key (arg 10) is the {job_id}_{basename} identity; llm_model_extracted moved to arg 11.
+    assert args0[10] == f"{args0[1]}_{args0[4]}" and args1[10] == f"{args1[1]}_{args1[4]}"
+    assert args0[11] == server.LLM_MODEL and args1[11] == server.LLM_MODEL  # extractor captured at ingest
 
 
 # --------------------------------------------------------------------------- #
@@ -1955,9 +2020,10 @@ async def test_upload_threads_external_path_and_hash(tmp_path, client):
          patch.object(server, "_process_file", new=AsyncMock(return_value="doc-x")):
         resp = await client.post(f"{WS}/upload/batch", files=[_fake_upload("report.pdf", b"hello")], data={"metadata": meta})
     job_id = resp.json()["jobs"][0]["job_id"]
-    # Caller-supplied absolute file_path threaded onto the queued job + recorded
+    # The queue carries the LightRAG identity (lightrag_input = {job_id}_basename), NOT the
+    # display path; the real caller path is recorded as the display file_path.
     ws, j, d, m, fp = await server._job_queue.get()
-    assert fp == "/data/corpus/sub/report.pdf"
+    assert fp == f"{job_id}_report.pdf"
     assert server._jobs[job_id]["file_path"] == "/data/corpus/sub/report.pdf"
     # content_hash = sha256("hello")
     import hashlib
@@ -2581,3 +2647,204 @@ async def test_query_top_k_at_ceiling_ok(client):
 async def test_query_data_invalid_mode_422(client):
     resp = await client.post(f"{WS}/query/data", json={"query": "test", "mode": "bogus"})
     assert resp.status_code == 422
+
+
+# --------------------------------------------------------------------------- #
+# Reference real-path resolution (lightrag_key) + no-internal-leak
+# --------------------------------------------------------------------------- #
+
+def _meta_row(lightrag_key, file_path, file, **over):
+    row = {
+        "lightrag_key": lightrag_key, "file_path": file_path, "file": file,
+        "job_id": None, "description": None, "source_path": None,
+        "last_modified_time": None, "uploaded_at": None, "llm_model_extracted": None,
+    }
+    row.update(over)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_process_file_passes_lightrag_input_not_display(tmp_path):
+    # We hand LightRAG the {job_id}_basename identity, never the caller's real path.
+    path = tmp_path / "job1_report.txt"
+    path.write_text("hello world content here")
+    rag_stub.lightrag.ainsert.reset_mock()
+    await server._process_file(path, rag_stub, file_path="job1_report.txt")
+    assert rag_stub.lightrag.ainsert.call_args.kwargs.get("file_paths") == ["job1_report.txt"]
+
+
+@pytest.mark.asyncio
+async def test_process_file_captures_stored_key_from_docstatus(tmp_path):
+    # The join key is READ BACK from LightRAG's doc-status (its own stored value), not assumed.
+    path = tmp_path / "j_r.txt"
+    path.write_text("hello world content here")
+
+    class _Docs(dict):
+        def get(self, k, d=None):
+            return {"status": "processed", "content_length": 5, "file_path": "canon_r.txt"}
+
+    rag_stub.lightrag.aget_docs_by_ids.return_value = _Docs()
+    try:
+        doc_id, key = await server._process_file(path, rag_stub, file_path="j_r.txt")
+    finally:
+        rag_stub.lightrag.aget_docs_by_ids.return_value = _AnyKeyDocs()
+    assert key == "canon_r.txt"   # LightRAG's stored value, not our input "j_r.txt"
+
+
+@pytest.mark.asyncio
+async def test_lightrag_key_persisted_on_done(tmp_path):
+    server._db_pool = _mock_pool
+    _mock_pool.execute.reset_mock()
+    path = tmp_path / "aaa_f.txt"
+    path.write_text("content")
+    job_id = "keyjob"
+    server._jobs[job_id] = {"job_id": job_id, "file": "f.txt", "workspace": "alex",
+                            "status": "pending", "attempts": 0, "error": None, "batch_id": "b"}
+    with patch.object(server, "_process_file", new=AsyncMock(return_value=("doc-1", "keyjob_f.txt"))), \
+         patch.object(server, "get_workspace_rag", new=AsyncMock(return_value=rag_stub)):
+        await server._process_job("alex", job_id, path, "", None)
+    key_calls = [c for c in _mock_pool.execute.call_args_list if "SET lightrag_key" in str(c)]
+    assert key_calls, "expected an UPDATE ... SET lightrag_key"
+    assert key_calls[0].args[2] == "keyjob_f.txt"
+
+
+@pytest.mark.asyncio
+async def test_reference_resolves_basename_key_to_real_path(client):
+    # LightRAG returns its internal basename key; we resolve it to the real path + enrichment.
+    server._db_pool = _mock_pool
+    _mock_pool.fetch.reset_mock()
+    _mock_pool.fetch.return_value = [
+        _meta_row("ab12_cv.pdf", "/corpus/career/cv.pdf", "cv.pdf", job_id="ab12", description="CV")]
+    rag_stub.lightrag.aquery_llm.return_value = {
+        "status": "success",
+        "data": {"references": [{"reference_id": "1", "file_path": "ab12_cv.pdf"}]},
+        "llm_response": {"content": "a", "is_streaming": False}, "metadata": {},
+    }
+    ref = (await client.post(f"{WS}/query", json={"query": "t"})).json()["references"][0]
+    assert ref["file_path"] == "/corpus/career/cv.pdf"
+    assert ref["file_name"] == "cv.pdf"
+    assert ref["job_id"] == "ab12" and ref["file_description"] == "CV"
+    assert "lightrag_key" not in ref and "ab12_cv.pdf" not in str(ref)
+    _mock_pool.fetch.return_value = []
+
+
+@pytest.mark.asyncio
+async def test_reference_basename_collision_distinct_paths(client):
+    # Two files with the same basename resolve to their OWN real paths (unique-key by design).
+    server._db_pool = _mock_pool
+    _mock_pool.fetch.reset_mock()
+    _mock_pool.fetch.return_value = [
+        _meta_row("job1_report.pdf", "/corpus/2024/report.pdf", "report.pdf", job_id="job1"),
+        _meta_row("job2_report.pdf", "/corpus/2025/report.pdf", "report.pdf", job_id="job2"),
+    ]
+    rag_stub.lightrag.aquery_llm.return_value = {
+        "status": "success",
+        "data": {"references": [
+            {"reference_id": "1", "file_path": "job1_report.pdf"},
+            {"reference_id": "2", "file_path": "job2_report.pdf"},
+        ]},
+        "llm_response": {"content": "a", "is_streaming": False}, "metadata": {},
+    }
+    refs = (await client.post(f"{WS}/query", json={"query": "t"})).json()["references"]
+    assert refs[0]["file_path"] == "/corpus/2024/report.pdf"
+    assert refs[1]["file_path"] == "/corpus/2025/report.pdf"
+    _mock_pool.fetch.return_value = []
+
+
+@pytest.mark.asyncio
+async def test_files_endpoint_hides_lightrag_key(client):
+    server._db_pool = _mock_pool
+    _mock_pool.fetch.reset_mock()
+    _mock_pool.fetch.return_value = [{
+        "job_id": "j", "file": "f.txt", "file_path": "/corpus/f.txt", "source_path": None,
+        "doc_id": "doc-1", "content_hash": "h", "status": "done",
+        "last_modified_time": None, "uploaded_at": None,
+    }]
+    files = (await client.get(f"{WS}/files")).json()["files"]
+    assert files and "lightrag_key" not in files[0]
+    assert files[0]["file_path"] == "/corpus/f.txt"
+    _mock_pool.fetch.return_value = []
+
+
+def test_safe_ref_name_strips_directories():
+    assert server._safe_ref_name("a/b/c.txt") == "c.txt"
+    assert server._safe_ref_name("..\\x\\y.pdf") == "y.pdf"
+    assert server._safe_ref_name("plain.txt") == "plain.txt"
+    assert server._safe_ref_name(None) == ""
+
+
+def test_strip_job_prefix():
+    assert server._strip_job_prefix("20ed9a7c_Tag_1.pdf") == "Tag_1.pdf"
+    assert server._strip_job_prefix("beefcafe_notes.txt") == "notes.txt"
+    assert server._strip_job_prefix("no_prefix_here.txt") == "no_prefix_here.txt"  # 'no' isn't hex-run
+    assert server._strip_job_prefix("plain.txt") == "plain.txt"
+    assert server._strip_job_prefix("") == ""
+
+
+def test_rewrite_answer_refs_resolved_and_unresolved():
+    meta = {"20ed9a7c_Tag_1.pdf": {"file": "sub/Tag_1.pdf"}}
+    raw = [{"file_path": "20ed9a7c_Tag_1.pdf"}, {"file_path": "beefcafe_notes.txt"}]
+    prose = "Body.\n### References\n- [1] 20ed9a7c_Tag_1.pdf\n- [2] beefcafe_notes.txt"
+    out = server._rewrite_answer_refs(prose, raw, meta)
+    assert "20ed9a7c_Tag_1.pdf" not in out and "beefcafe_notes.txt" not in out
+    assert "[1] Tag_1.pdf" in out          # resolved -> clean basename (dir part dropped)
+    assert "[2] notes.txt" in out          # unresolved -> hex prefix stripped
+    # empty / no-refs are no-ops
+    assert server._rewrite_answer_refs("", raw, meta) == ""
+    assert server._rewrite_answer_refs("text", [], {}) == "text"
+
+
+def test_rewrite_answer_refs_no_partial_substring_hit():
+    # A key that is a substring of a longer key must not be rewritten inside the longer one.
+    meta = {}
+    raw = [{"file_path": "aa11beef_x.txt"}, {"file_path": "aa11beef_x.txt.bak_extra"}]
+    prose = "[1] aa11beef_x.txt.bak_extra and [2] aa11beef_x.txt"
+    out = server._rewrite_answer_refs(prose, raw, meta)
+    # longest-first replacement keeps the longer token intact as its own stripped form
+    assert "aa11beef_x.txt.bak_extra" not in out
+    assert "x.txt.bak_extra" in out        # longer key stripped whole
+    assert out.count("x.txt") >= 2
+
+
+def test_job_path_sanitizes_separators_no_traversal(tmp_path, monkeypatch):
+    # A filename carrying a path separator must not create subdirs or escape the
+    # workspace dir — the on-disk name is basenamed just like the LightRAG key.
+    monkeypatch.setattr(server, "WORKING_DIR", str(tmp_path))
+    p = server._job_path("test", "deadbeef", "nav/watchtower[spec].txt")
+    assert p.parent == tmp_path / "test"           # stays inside the workspace dir
+    assert p.name == "deadbeef_watchtower[spec].txt"  # separator stripped, job_id intact
+    # a traversal attempt is neutralised to a plain basename under the workspace dir
+    ev = server._job_path("test", "deadbeef", "../../etc/passwd")
+    assert ev.parent == tmp_path / "test"
+    assert ev.name == "deadbeef_passwd"
+
+
+# --------------------------------------------------------------------------- #
+# file_path_contains — blank/empty means "no filter → all data"
+# --------------------------------------------------------------------------- #
+
+def test_path_matches_any_blank_needles_keep_all():
+    assert server._path_matches_any("/x/y.pdf", [""]) is True
+    assert server._path_matches_any("/x/y.pdf", ["  "]) is True
+    assert server._path_matches_any("/x/y.pdf", ["", "  "]) is True
+    assert server._path_matches_any(None, [""]) is True
+    # a real needle still filters; blanks alongside a real needle are ignored
+    assert server._path_matches_any("/x/y.pdf", ["/z/"]) is False
+    assert server._path_matches_any("/x/y.pdf", ["", "/x/"]) is True
+
+
+@pytest.mark.asyncio
+async def test_query_data_blank_filter_returns_all(client):
+    rag_stub.lightrag.aquery_data.return_value = {
+        "status": "success", "message": "ok",
+        "data": {"entities": [{"entity_name": "A", "file_path": "/a"},
+                              {"entity_name": "B", "file_path": "/b"}],
+                 "relationships": [], "chunks": [], "references": []},
+        "metadata": {},
+    }
+    # Swagger's auto-populated [""] must return ALL data, not an empty set.
+    resp = await client.post(f"{WS}/query/data", json={"query": "t", "file_path_contains": [""]})
+    ents = [e["entity_name"] for e in resp.json()["data"]["entities"]]
+    assert ents == ["A", "B"]
+    # and the boost is not triggered by a blank-only filter
+    assert lightrag_mod.QueryParam.call_args.kwargs.get("top_k") == 40

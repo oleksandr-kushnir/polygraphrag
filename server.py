@@ -349,25 +349,30 @@ def _content_doc_id(content: str) -> str:
     return compute_mdhash_id(sanitize_text_for_encoding(content), prefix="doc-")
 
 
-async def _verify_ingestion(rag_instance: RAGAnything, content: str) -> tuple[str, str | None, str]:
+async def _verify_ingestion(
+    rag_instance: RAGAnything, content: str
+) -> tuple[str, str | None, str, str | None]:
     """Confirm LightRAG fully ingested `content` (chunks AND graph), not just stored chunks.
-    Returns (verdict, doc_id, reason) where verdict is "ok" or "failed". The doc id is computed the
-    same way it was pinned at insert (`doc-<md5(sanitized_content)>`), so re-ingesting identical
-    content resolves to the already-present document and reports its real status."""
+    Returns (verdict, doc_id, reason, lightrag_key) where verdict is "ok"/"failed". The doc id is
+    computed the same way it was pinned at insert (`doc-<md5(sanitized_content)>`). `lightrag_key`
+    is the `file_path` LightRAG *actually stored* for this doc (its canonical citation key), read
+    straight back from the doc-status — so our reference join uses LightRAG's own value and never
+    has to reproduce its canonicalization."""
     doc_id = _content_doc_id(content)
     docs = await rag_instance.lightrag.aget_docs_by_ids(doc_id)
     status_doc = docs.get(doc_id) if isinstance(docs, dict) else None
     if status_doc is None:
-        return "failed", doc_id, "no_doc_status"
+        return "failed", doc_id, "no_doc_status", None
+    lightrag_key = _doc_status_field(status_doc, "file_path", None)
     raw_status = _doc_status_field(status_doc, "status")
     status = getattr(raw_status, "value", raw_status)  # DocStatus enum → str; str stays str
     if status != "processed":
-        return "failed", doc_id, f"doc_status={status}"
+        return "failed", doc_id, f"doc_status={status}", lightrag_key
     if RAG_REQUIRE_GRAPH_EXTRACTION:
         content_length = _doc_status_field(status_doc, "content_length", None) or len(content)
         if content_length >= RAG_MIN_CONTENT_FOR_ENTITIES and await _count_doc_entities(rag_instance, doc_id) == 0:
-            return "failed", doc_id, "empty_graph"
-    return "ok", doc_id, "processed"
+            return "failed", doc_id, "empty_graph", lightrag_key
+    return "ok", doc_id, "processed", lightrag_key
 
 
 def _join_path(path_root: str, rel_path: str) -> str:
@@ -379,12 +384,13 @@ def _join_path(path_root: str, rel_path: str) -> str:
 
 async def _process_file(
     path: Path, rag_instance: RAGAnything, description_text: str = "", file_path: str | None = None,
-) -> str | None:
+) -> tuple[str | None, str | None]:
     """Parse `path` and insert it into LightRAG, then verify the ingestion actually completed.
-    `file_path` is the identity stored in LightRAG (a caller-supplied absolute path when provided;
-    falls back to the on-disk basename for ad-hoc uploads). Returns the LightRAG doc id on
-    success (None for the multimodal fallback path); raises IngestionIncompleteError if the graph
-    extraction did not complete.
+    `file_path` is the identity handed to LightRAG (the `{job_id}_{basename}` lightrag_input for
+    uploads; falls back to the on-disk basename). Returns `(doc_id, lightrag_key)` — the LightRAG
+    doc id and the file_path LightRAG actually stored (its canonical citation key), both None for
+    the multimodal fallback path; raises IngestionIncompleteError if graph extraction did not
+    complete.
 
     Runs under the "extract" LLM phase so the entity/relationship extraction calls route to the
     extraction provider (LLM_*), independent of the query-time provider (QUERY_LLM_*)."""
@@ -425,7 +431,7 @@ async def _process_file_impl(
         text = path.read_text(encoding="utf-8", errors="replace")
     else:
         await rag_instance.process_document_complete(file_path=str(path))
-        return None
+        return None, None
     content = text
     if description_text:
         content += f"\n\nDescription: {description_text}"
@@ -434,9 +440,13 @@ async def _process_file_impl(
     # across releases; passing an explicit `ids=` makes the stored id deterministic and equal to
     # what _verify_ingestion recomputes from the same content.
     doc_id = _content_doc_id(content)
-    await rag_instance.lightrag.ainsert(content, ids=[doc_id], file_paths=[file_path or path.name])
-    # Don't trust ainsert returning — confirm the graph extraction actually completed.
-    verdict, doc_id, reason = await _verify_ingestion(rag_instance, content)
+    # `file_path` here is the LightRAG identity (lightrag_input = `{job_id}_{basename}` for
+    # uploads). LightRAG canonicalizes it; we read the stored value back below as the join key.
+    lightrag_input = file_path or path.name
+    await rag_instance.lightrag.ainsert(content, ids=[doc_id], file_paths=[lightrag_input])
+    # Don't trust ainsert returning — confirm the graph extraction actually completed, and
+    # capture the exact file_path LightRAG stored (its canonical citation key).
+    verdict, doc_id, reason, lightrag_key = await _verify_ingestion(rag_instance, content)
     if verdict != "ok":
         # Clean up the partial doc (+ its LLM cache) so the retry re-extracts instead of being
         # skipped as a duplicate or served a stale cached extraction.
@@ -446,7 +456,7 @@ async def _process_file_impl(
             except Exception as exc:
                 logging.warning("cleanup of partial doc %s failed: %s", doc_id, exc)
         raise IngestionIncompleteError(f"ingestion incomplete ({reason})")
-    return doc_id
+    return doc_id, (lightrag_key or lightrag_input)
 
 
 def _build_metadata(description: str, source_path: str, last_modified: str) -> str:
@@ -503,14 +513,32 @@ async def _db_init(pool) -> None:
     # Durable per-file index columns (system of record, survive raw-file deletion):
     #   content_hash — SHA-256 of ingested bytes (sync change-detection key)
     #   doc_id       — LightRAG doc-<md5> (precise delete key, captured at ingest)
-    #   file_path    — identity passed to LightRAG (caller-supplied absolute path when provided)
+    #   file_path    — the REAL, openable display path (caller path when provided, else filename)
+    #   lightrag_key — the citation key LightRAG actually stored (read back at ingest); JOIN-ONLY,
+    #                  never returned to clients. Maps a LightRAG reference back to this row.
     await pool.execute("ALTER TABLE rag_file_metadata ADD COLUMN IF NOT EXISTS content_hash TEXT")
     await pool.execute("ALTER TABLE rag_file_metadata ADD COLUMN IF NOT EXISTS doc_id TEXT")
     await pool.execute("ALTER TABLE rag_file_metadata ADD COLUMN IF NOT EXISTS file_path TEXT")
+    await pool.execute("ALTER TABLE rag_file_metadata ADD COLUMN IF NOT EXISTS lightrag_key TEXT")
     # llm_model_extracted — the text LLM (LLM_MODEL) active when this file's entities were
     # extracted. Captured at ingest; surfaced in /query references. Pre-existing rows stay NULL
     # (they were ingested before this was tracked).
     await pool.execute("ALTER TABLE rag_file_metadata ADD COLUMN IF NOT EXISTS llm_model_extracted TEXT")
+    # Backfill lightrag_key from the old file_path (which WAS the value passed to LightRAG), so
+    # pre-existing rows keep resolving without a re-ingest.
+    await pool.execute(
+        "UPDATE rag_file_metadata SET lightrag_key = file_path WHERE lightrag_key IS NULL")
+    # Clean legacy display paths: rows ingested before the split stored the on-disk
+    # `{job_id}_{filename}` token in file_path. Reset those to a real display value (the caller's
+    # source_path, else the original filename) so references stop showing the internal token.
+    # Real caller paths (path_root/source_path joins) never equal `{job_id}_{file}`, so they are
+    # left untouched.
+    await pool.execute(
+        "UPDATE rag_file_metadata SET file_path = COALESCE(NULLIF(source_path, ''), file) "
+        "WHERE file_path = job_id || '_' || file")
+    await pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rag_file_metadata_lightrag_key "
+        "ON rag_file_metadata (workspace, lightrag_key)")
     await _db_seed_primary_workspace(pool)
 
 
@@ -604,17 +632,17 @@ async def get_workspace_rag(workspace_id: str) -> RAGAnything:
 
 async def _db_insert_job(
     pool, record: dict, description: str, source_path: str, last_modified_time: str,
-    content_hash: str | None = None, file_path: str | None = None,
+    content_hash: str | None = None, file_path: str | None = None, lightrag_key: str | None = None,
 ) -> None:
     await pool.execute(
         """INSERT INTO rag_file_metadata
                (job_id, batch_id, workspace, file, description, source_path, last_modified_time,
-                content_hash, file_path, llm_model_extracted)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                content_hash, file_path, lightrag_key, llm_model_extracted)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
            ON CONFLICT (job_id) DO NOTHING""",
         record["job_id"], record["batch_id"], record["workspace"], record["file"],
         description or None, source_path or None, last_modified_time or None,
-        content_hash or None, file_path or None, LLM_MODEL,
+        content_hash or None, file_path or None, lightrag_key or None, LLM_MODEL,
     )
 
 
@@ -632,81 +660,167 @@ async def _db_set_doc_id(pool, job_id: str, doc_id: str) -> None:
     )
 
 
+async def _db_set_lightrag_key(pool, job_id: str, lightrag_key: str) -> None:
+    """Persist the canonical citation key LightRAG stored (read back at ingest). This is the
+    authoritative reference-join key — overwrites the provisional value set at upload time."""
+    await pool.execute(
+        "UPDATE rag_file_metadata SET lightrag_key=$2 WHERE job_id=$1", job_id, lightrag_key,
+    )
+
+
 def _ref_basename(path: str) -> str:
     """Display filename from a stored file_path (absolute path or bare name)."""
     return path.replace("\\", "/").rsplit("/", 1)[-1] if path else path
 
 
+def _safe_ref_name(name: str | None) -> str:
+    """Basename a caller-supplied filename ourselves (strip any '/' or '\\' and directory
+    parts). Used to build the LightRAG identity `{job_id}_{safe}`: with no path separator,
+    LightRAG's basename canonicalization can never drop the unique `job_id` prefix, so distinct
+    documents keep distinct keys by construction."""
+    return (name or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
+
+
+def _clean_needles(needles: list[str] | None) -> list[str]:
+    """Drop blank/whitespace-only entries from a file_path_contains list. An all-blank list
+    (e.g. Swagger UI's auto-populated `[""]`) therefore means 'no filter → all data', never an
+    accidental empty result set."""
+    return [n for n in (needles or []) if n and n.strip()]
+
+
+_JOB_KEY_PREFIX = re.compile(r"^[0-9a-f]{6,}_")
+
+
+def _strip_job_prefix(name: str) -> str:
+    """Strip a leading `{job_id}_` hex prefix from a citation key so no internal token/hex
+    surfaces when a reference can't be resolved to a metadata row. Unchanged if absent."""
+    return _JOB_KEY_PREFIX.sub("", name) if name else name
+
+
+def _rewrite_answer_refs(result: str, raw_references, meta_map: dict[str, dict]) -> str:
+    """Rewrite LightRAG's internal citation keys embedded in the answer PROSE to the clean
+    filename — the same no-internal-name guarantee we give the structured `references[]`.
+
+    LightRAG tags each retrieved chunk with its `file_path` (our internal `{job_id}_{basename}`
+    join key) and its answer prompt renders a `### References` list from those values, so the raw
+    key leaks into `result`. Each key is a unique, slash-free `{job_id}_{basename}` token, so a
+    literal replace is safe (it cannot collide with unrelated prose). A resolved key becomes the
+    clean original basename (`_safe_ref_name(row.file)`); an unresolved key falls back to stripping
+    its `{job_id}_` prefix so no hex/internal token ever surfaces. Pure string mapping over values
+    we mint and store, so it stays correct across LightRAG versions and prompt formats."""
+    if not result:
+        return result
+    replacements: dict[str, str] = {}
+    for ref in raw_references or []:
+        key = ref.get("file_path") or ""
+        if not key or key in replacements:
+            continue
+        row = meta_map.get(key)
+        display = _safe_ref_name(row["file"]) if row else _strip_job_prefix(key)
+        if display and display != key:
+            replacements[key] = display
+    # Longest key first: a key that is a substring of another can't be partially rewritten.
+    for key in sorted(replacements, key=len, reverse=True):
+        result = result.replace(key, replacements[key])
+    return result
+
+
 def _path_matches_any(value: str | None, needles: list[str] | None) -> bool:
     """OR-filter a stored file_path against a list of case-insensitive substrings.
     `value` may be a GRAPH_FIELD_SEP-joined list of paths (entities/relationships carry the
-    joined source-file list); a plain substring test still matches within it. Empty/None
+    joined source-file list); a plain substring test still matches within it. Empty/None/blank
     `needles` => no filter (keep everything); a non-empty needle list with an empty `value`
     => no match."""
+    needles = _clean_needles(needles)
     if not needles:
         return True
     if not value:
         return False
     lowered = value.lower()
-    return any(n.lower() in lowered for n in needles if n)
+    return any(n.lower() in lowered for n in needles)
 
 
-async def _db_fetch_metadata_by_path(
-    pool, file_paths: list[str], phys: str | None
+async def _db_fetch_metadata_by_key(
+    pool, keys: list[str], phys: str | None
 ) -> dict[str, dict]:
-    """Map stored file_path -> its rag_file_metadata row (newest wins on dups)."""
-    if not file_paths:
+    """Map each LightRAG citation key -> its rag_file_metadata row. Layered so a real path always
+    resolves even across LightRAG canonicalization quirks:
+      1. exact match on `lightrag_key` (the value LightRAG stored, read back at ingest);
+      2. fallback: the original filename column `file` == key (rescues legacy rows whose
+         backfilled key was a full path but LightRAG returned only the basename).
+    Newest upload wins on duplicates. `file_path` returned here is the REAL display path."""
+    if not keys:
         return {}
+    cols = ("lightrag_key, file_path, file, job_id, description, source_path, "
+            "last_modified_time, uploaded_at, llm_model_extracted")
     if phys is not None:
         rows = await pool.fetch(
-            "SELECT DISTINCT ON (file_path) file_path, file, job_id, description, source_path, "
-            "last_modified_time, uploaded_at, llm_model_extracted FROM rag_file_metadata "
-            "WHERE workspace = $2 AND file_path = ANY($1) ORDER BY file_path, uploaded_at DESC",
-            file_paths, phys,
+            f"SELECT {cols} FROM rag_file_metadata "
+            "WHERE workspace = $2 AND (lightrag_key = ANY($1) OR file = ANY($1)) "
+            "ORDER BY uploaded_at DESC",
+            keys, phys,
         )
     else:
         rows = await pool.fetch(
-            "SELECT DISTINCT ON (file_path) file_path, file, job_id, description, source_path, "
-            "last_modified_time, uploaded_at, llm_model_extracted FROM rag_file_metadata "
-            "WHERE file_path = ANY($1) ORDER BY file_path, uploaded_at DESC",
-            file_paths,
+            f"SELECT {cols} FROM rag_file_metadata "
+            "WHERE (lightrag_key = ANY($1) OR file = ANY($1)) ORDER BY uploaded_at DESC",
+            keys,
         )
-    return {row["file_path"]: dict(row) for row in rows}
+    by_key: dict[str, dict] = {}
+    by_file: dict[str, dict] = {}
+    for r in rows:  # newest-first; setdefault keeps the newest
+        d = dict(r)
+        if d.get("lightrag_key"):
+            by_key.setdefault(d["lightrag_key"], d)
+        if d.get("file"):
+            by_file.setdefault(d["file"], d)
+    resolved = {}
+    for k in keys:
+        m = by_key.get(k) or by_file.get(k)
+        if m is not None:
+            resolved[k] = m
+    return resolved
 
 
 async def _build_references(
     raw_references: list[dict] | None, phys: str | None = None, answered_model: str | None = None
-) -> list[dict]:
-    """Enrich LightRAG references with metadata from rag_file_metadata, keyed by the stored
-    `file_path` — a caller-supplied absolute path when provided, or the basename for ad-hoc
-    uploads. Shared by /query and /query/data.
+) -> tuple[list[dict], dict[str, dict]]:
+    """Resolve LightRAG references to their REAL document path + metadata via rag_file_metadata,
+    joining on the citation key LightRAG returns (matched against `lightrag_key`). Shared by
+    /query and /query/data. Returns `(references, meta_map)` where `meta_map` is the internal
+    key→row map (used by /query to rewrite the answer prose; never emitted in any response).
 
-    `answered_model` is the text LLM that synthesised the answer for THIS query; it is added as
-    `llm_model_answered` only when supplied (so /query/data, which generates no answer, omits it).
+    References expose only real, user-meaningful values: `file_path` is the caller's openable path
+    and `file_name` the clean original filename. LightRAG's internal name / our join key are NEVER
+    emitted; when a reference can't be resolved to a row, `file_path`/`file_name` are null (we do
+    not echo LightRAG's raw internal value).
 
-    (The previous job_id-prefix parsing broke once ingestion started storing absolute
-    file_paths instead of `{job_id}_{filename}`, so enrichment silently returned all-null.)"""
-    references = []
+    `answered_model` is the text LLM that synthesised the answer for THIS query; added as
+    `llm_model_answered` only when supplied (so /query/data, which generates no answer, omits it)."""
+    keys = []
     for ref in raw_references or []:
-        stored = ref.get("file_path", "") or ""
-        references.append({"reference_id": ref.get("reference_id"), "file_path": stored})
+        keys.append(ref.get("file_path", "") or "")   # LightRAG's citation key (its internal name)
     meta_map: dict[str, dict] = {}
-    if references and _db_pool:
-        meta_map = await _db_fetch_metadata_by_path(
-            _db_pool, [r["file_path"] for r in references if r["file_path"]], phys
-        )
-    for ref in references:
-        m = meta_map.get(ref["file_path"])
-        ref["file_name"] = (m.get("file") if m else None) or _ref_basename(ref["file_path"])
-        ref["job_id"] = m.get("job_id") if m else None
-        ref["file_description"] = m.get("description") if m else None
-        ref["last_modified_time"] = m.get("last_modified_time") if m else None
+    if any(keys) and _db_pool:
+        meta_map = await _db_fetch_metadata_by_key(_db_pool, [k for k in keys if k], phys)
+    references = []
+    for ref, key in zip(raw_references or [], keys):
+        m = meta_map.get(key)
+        out = {
+            "reference_id": ref.get("reference_id"),
+            "file_path": m.get("file_path") if m else None,   # REAL path only; never the key
+            "file_name": m.get("file") if m else None,        # clean original filename only
+            "job_id": m.get("job_id") if m else None,
+            "file_description": m.get("description") if m else None,
+            "last_modified_time": m.get("last_modified_time") if m else None,
+        }
         ua = m.get("uploaded_at") if m else None
-        ref["uploaded_at"] = ua.strftime("%Y-%m-%dT%H:%M:%S") if hasattr(ua, "strftime") else ua
-        ref["llm_model_extracted"] = m.get("llm_model_extracted") if m else None
+        out["uploaded_at"] = ua.strftime("%Y-%m-%dT%H:%M:%S") if hasattr(ua, "strftime") else ua
+        out["llm_model_extracted"] = m.get("llm_model_extracted") if m else None
         if answered_model is not None:
-            ref["llm_model_answered"] = answered_model
-    return references
+            out["llm_model_answered"] = answered_model
+        references.append(out)
+    return references, meta_map
 
 
 # --- Graph visualisation ---
@@ -841,10 +955,15 @@ def _query_param(QueryParam, *, mode, include_references=None, top_k=None, chunk
 
 
 def _job_path(workspace_id: str, job_id: str, filename: str) -> Path:
-    """On-disk path for an uploaded file, namespaced per workspace."""
+    """On-disk path for an uploaded file, namespaced per workspace.
+
+    The filename is basenamed with `_safe_ref_name` (same helper that builds the LightRAG
+    key) so a caller-supplied separator can neither create stray subdirectories nor escape
+    the workspace dir via traversal (`../..`). The `{job_id}_` prefix keeps it unique.
+    """
     d = Path(WORKING_DIR) / workspace_id
     d.mkdir(parents=True, exist_ok=True)
-    return d / f"{job_id}_{filename}"
+    return d / f"{job_id}_{_safe_ref_name(filename)}"
 
 
 async def _db_reload_jobs(pool) -> None:
@@ -875,9 +994,10 @@ async def _db_reload_jobs(pool) -> None:
         dest = Path(WORKING_DIR) / physical / f"{job_id}_{row['file']}"
         if pub_row is not None and dest.exists():
             description_text = _build_metadata(row["description"] or "", row["source_path"] or "", row["last_modified_time"] or "")
-            file_path = row.get("file_path") or dest.name
+            # Re-hand LightRAG the same identity (lightrag_input), NOT the real display file_path.
+            lightrag_input = f"{job_id}_{_safe_ref_name(row['file'])}"
             await _db_update_status(pool, job_id, "pending", row["attempts"], None)
-            await _job_queue.put((pub_row["id"], job_id, dest, description_text, file_path))
+            await _job_queue.put((pub_row["id"], job_id, dest, description_text, lightrag_input))
         else:
             record["status"] = "failed"
             record["error"] = "File missing after restart"
@@ -900,14 +1020,18 @@ async def _process_job(
         rag_instance = await get_workspace_rag(workspace_id)
         lock = await _get_ws_lock(workspace_id)
         async with lock:
-            doc_id = await _process_file(
+            result = await _process_file(
                 dest, rag_instance, description_text=description_text, file_path=file_path)
+        # `_process_file` returns (doc_id, lightrag_key); tolerate a bare doc_id from older mocks.
+        doc_id, lightrag_key = result if isinstance(result, tuple) else (result, None)
         job["status"] = "done"
         job["doc_id"] = doc_id
         if _db_pool:
             await _db_update_status(_db_pool, job_id, "done", job["attempts"], None)
             if doc_id:
                 await _db_set_doc_id(_db_pool, job_id, doc_id)
+            if lightrag_key:
+                await _db_set_lightrag_key(_db_pool, job_id, lightrag_key)
         # The DB index is the system of record; the raw bytes are redundant once ingested
         # (the source lives in the workspace), so drop them on success. Kept on retry/failure.
         dest.unlink(missing_ok=True)
@@ -1102,13 +1226,13 @@ class QueryDataRequest(BaseModel):
     file_path_contains: list[str] = Field(
         default_factory=list,
         description=(
-            "Optional folder/file scope filter: a list of case-insensitive substrings matched (OR) "
-            "against each result's file_path. An entity/relationship/chunk/reference is kept if its "
-            "file_path contains ANY of the strings. Empty list (the default) = no filtering. "
-            "Matching runs AFTER retrieval (the retrieval budget is auto-boosted when set), so a very "
-            "narrow folder may return fewer items than exist. "
-            "Example: [\"/opt/data/workspace/career/\", \"/opt/data/workspace/projects/\"]."),
-        examples=[["/opt/data/workspace/career/"]])
+            "Optional folder/file scope filter. **Omit it, or leave it empty, to get ALL data "
+            "(no filtering) — this is the default.** When provided, it is a case-insensitive OR "
+            "substring filter on each result's file_path: an entity/relationship/chunk/reference "
+            "is kept if its file_path contains ANY of the strings (blank strings are ignored). "
+            "Matching runs AFTER retrieval (the retrieval budget is auto-boosted when set), so a "
+            "very narrow folder may return fewer items than exist. "
+            "Example (to narrow): [\"/corpus/career/\", \"/corpus/projects/\"]."))
 
 
 class WorkspaceCreate(BaseModel):
@@ -1399,9 +1523,11 @@ async def require_workspace(workspace_id: str) -> dict:
         "Upload a batch of files into the workspace; ingestion runs asynchronously in the background. "
         "Send `files` as `multipart/form-data`. Optionally send `metadata` as a JSON array of objects "
         "**index-aligned with `files`** — each may carry `description`, `source_path`, `path_root`, and "
-        "`last_modified_time` (only `description` is embedded into the searchable text). When both "
-        "`source_path` and `path_root` are given, the file's stored identity becomes `path_root/source_path` "
-        "so query references resolve back to your own source tree. "
+        "`last_modified_time` (only `description` is embedded into the searchable text). "
+        "**Supply both `source_path` and `path_root`** to record the file's real path "
+        "(`path_root/source_path`): that path is what `/query` and `/query/data` return in "
+        "`references[].file_path`, so citations resolve back to your own source tree. Without them, "
+        "references carry the original filename. "
         "Supported types include PDF, images, Office docs, audio, and text/markdown/CSV. "
         "Returns a `batch_id` plus a per-file `job_id`; poll `/workspace/{id}/status/{job_id}` or "
         "`/workspace/{id}/batch/{batch_id}` for progress."
@@ -1508,10 +1634,16 @@ async def upload_batch(
             with dest.open("wb") as fh:
                 fh.write(raw)
             content_hash = hashlib.sha256(raw).hexdigest()
-            # When the caller supplies both a relative source_path and a path_root, store the joined
-            # absolute path as the LightRAG identity so query references resolve back to the caller's
-            # own source tree. Ad-hoc uploads (no source_path/root) keep the on-disk basename.
-            file_path = _join_path(path_root, source_path) if (path_root and source_path) else dest.name
+            # Two distinct identities per file:
+            #  - lightrag_input: what we hand LightRAG. `{job_id}_{basename}` is unique and
+            #    slash-free, so LightRAG's basename canonicalization can't drop the job_id and
+            #    keys never collide. (Read back as `lightrag_key` after ingest; JOIN-ONLY.)
+            #  - display_path: the REAL, openable path shown in references/`/files` — the caller's
+            #    path_root/source_path join when given, else source_path, else the plain filename.
+            #    Never the on-disk `{job_id}_` token.
+            lightrag_input = f"{job_id}_{_safe_ref_name(file.filename)}"
+            display_path = (_join_path(path_root, source_path) if (path_root and source_path)
+                            else (source_path or _safe_ref_name(file.filename)))
             description_text = _build_metadata(description, source_path, last_modified)
             record: dict = {
                 "job_id": job_id,
@@ -1522,14 +1654,15 @@ async def upload_batch(
                 "error": None,
                 "batch_id": batch_id,
                 "content_hash": content_hash,
-                "file_path": file_path,
+                "file_path": display_path,
             }
             _jobs[job_id] = record
             entries.append(record)
             if _db_pool:
                 await _db_insert_job(_db_pool, record, description, source_path, last_modified,
-                                     content_hash=content_hash, file_path=file_path)
-            await _job_queue.put((pub, job_id, dest, description_text, file_path))
+                                     content_hash=content_hash, file_path=display_path,
+                                     lightrag_key=lightrag_input)
+            await _job_queue.put((pub, job_id, dest, description_text, lightrag_input))
         except Exception as exc:
             entries.append({
                 "file": file.filename,
@@ -1723,7 +1856,10 @@ async def delete_file(body: FileDeleteRequest, ws: dict = Depends(require_worksp
     summary="Ask a question (LLM answer + citations)",
     description=(
         "Run a RAG query against the workspace and return a synthesised natural-language answer. "
-        "When `include_references` is true, the response also lists the source documents used. "
+        "When `include_references` is true, the response also lists the source documents used — "
+        "each reference's `file_path` is the **real, openable document path** you supplied at upload "
+        "(resolved server-side from Postgres), and `file_name` the original filename; neither is "
+        "LightRAG's internal name. "
         "For raw retrieved entities/relationships/chunks instead of a prose answer, use `/query/data`."
     ),
     responses={404: {"description": "Workspace not found or soft-deleted"}},
@@ -1743,12 +1879,12 @@ async def query(req: QueryRequest, ws: dict = Depends(require_workspace)):
         raise _internal_error(exc, "query") from exc
 
     result = (raw.get("llm_response") or {}).get("content", "")
-    references = []
-    if req.include_references:
-        references = await _build_references(
-            (raw.get("data") or {}).get("references"), ws["lightrag_workspace"],
-            answered_model=QUERY_LLM_MODEL)
-    return {"result": result, "references": references}
+    raw_refs = (raw.get("data") or {}).get("references")
+    # Build the key→row map even to only rewrite the prose; emit the structured refs when asked.
+    references, meta_map = await _build_references(
+        raw_refs, ws["lightrag_workspace"], answered_model=QUERY_LLM_MODEL)
+    result = _rewrite_answer_refs(result, raw_refs, meta_map)
+    return {"result": result, "references": references if req.include_references else []}
 
 
 @app.post(
@@ -1770,7 +1906,7 @@ async def query(req: QueryRequest, ws: dict = Depends(require_workspace)):
 )
 async def query_data(req: QueryDataRequest, ws: dict = Depends(require_workspace)):
     rag_instance = await get_workspace_rag(ws["id"])
-    needles = req.file_path_contains
+    needles = _clean_needles(req.file_path_contains)   # blank/empty => no filter (all data)
     # Post-filter runs after retrieval; widen the candidate set so a narrow folder still has hits.
     top_k = req.top_k * RAG_FILTER_TOPK_BOOST if needles else req.top_k
     chunk_top_k = None if not needles else req.top_k * RAG_FILTER_TOPK_BOOST
@@ -1791,8 +1927,8 @@ async def query_data(req: QueryDataRequest, ws: dict = Depends(require_workspace
             r for r in (data.get("relationships") or []) if _path_matches_any(r.get("file_path"), needles)]
         data["chunks"] = [
             c for c in (data.get("chunks") or []) if _path_matches_any(c.get("file_path"), needles)]
-    references = await _build_references(
-        data.get("references"), ws["lightrag_workspace"]) if req.include_references else []
+    references, _ = await _build_references(
+        data.get("references"), ws["lightrag_workspace"]) if req.include_references else ([], {})
     if needles:
         references = [r for r in references if _path_matches_any(r.get("file_path"), needles)]
     return {
@@ -1854,24 +1990,26 @@ async def graph_html(
     file_path_contains: list[str] = Query(
         default_factory=list,
         description=(
-            "Optional folder/file scope filter: repeatable case-insensitive substrings. Keep only nodes "
-            "whose file_path contains ANY of them (OR). Empty (default) = no filtering. Applied after "
-            "graph selection, so a very narrow folder may render sparsely."),
+            "Optional folder/file scope filter: repeatable case-insensitive substrings. Omit or leave "
+            "empty to render the WHOLE graph (no filtering, the default). When provided, keep only nodes "
+            "whose file_path contains ANY of them (OR; blank strings ignored). Applied after graph "
+            "selection, so a very narrow folder may render sparsely."),
     ),
     ws: dict = Depends(require_workspace),
 ):
     rag_instance = await get_workspace_rag(ws["id"])
+    needles = _clean_needles(file_path_contains)   # blank/empty => no filter (whole graph)
     # Post-filter runs after graph selection; widen the fetch so a narrow folder still has nodes.
-    fetch_nodes = max_nodes * RAG_FILTER_TOPK_BOOST if file_path_contains else max_nodes
+    fetch_nodes = max_nodes * RAG_FILTER_TOPK_BOOST if needles else max_nodes
     try:
         kg = await rag_instance.lightrag.get_knowledge_graph(
             node_label=node_label, max_depth=max_depth, max_nodes=fetch_nodes,
         )
     except Exception as exc:
         raise _internal_error(exc, "graph.html") from exc
-    if file_path_contains:
+    if needles:
         kg.nodes = [
             n for n in kg.nodes
-            if _path_matches_any((n.properties or {}).get("file_path"), file_path_contains)
+            if _path_matches_any((n.properties or {}).get("file_path"), needles)
         ]
     return HTMLResponse(_build_graph_html(kg, physics))

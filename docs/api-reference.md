@@ -115,10 +115,12 @@ Ask a natural-language question and get a synthesized answer.
 
 Returns the answer plus, when `include_references` is true, enriched source-document citations.
 
+**Reference paths are real, not internal.** Each `references[].file_path` is the **openable document path you supplied at upload** (via `path_root` + `source_path`), resolved server-side from Postgres — **not** LightRAG's internal canonical name. `file_name` is the original filename. If a reference can't be resolved to a stored file, `file_path`/`file_name` are `null` (the internal name is never exposed). LightRAG 1.5.x canonicalizes its own `file_path` to a basename for dedup; PolyGraphRAG keeps the authoritative path in its own metadata and maps citations back to it, so this stays correct across LightRAG versions.
+
 ### `POST /workspace/{id}/query/data`
 Structured retrieval **without** LLM answer generation — returns the entities, relationships, chunks, and references that retrieval selected. Same fields as `/query`, plus:
 
-- `file_path_contains` — a list of case-insensitive substrings; keep only results whose `file_path` contains any of them (folder/file scoping). Applied after retrieval, with an auto-boosted budget.
+- `file_path_contains` — folder/file scope filter. **Omit it or leave it empty to get ALL data (no filtering) — this is the default.** When provided, it is a case-insensitive **OR** substring filter: a result is kept if its `file_path` contains ANY of the strings (blank strings are ignored, so an all-blank list still returns everything). Applied after retrieval with an auto-boosted budget, so a very narrow scope may return fewer items than exist. References are matched on their resolved real path.
 
 Useful for building your own UI, debugging retrieval, or feeding another pipeline.
 
