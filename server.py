@@ -782,6 +782,51 @@ async def _db_fetch_metadata_by_key(
     return resolved
 
 
+def _graph_field_sep() -> str:
+    """LightRAG's multi-value delimiter for joined source lists (entities/relationships carry
+    several sources in one `file_path`). Read it from LightRAG so we stay in harmony with its
+    value; fall back to the stable literal if the import is unavailable (e.g. under test stubs)."""
+    try:
+        from lightrag.utils import GRAPH_FIELD_SEP as sep
+        if isinstance(sep, str) and sep:
+            return sep
+    except Exception:
+        pass
+    return "<SEP>"
+
+
+async def _resolve_block_file_paths(data: dict, phys: str | None) -> None:
+    """Rewrite LightRAG's internal citation keys in entity/relationship/chunk `file_path` fields to
+    the REAL document path from Postgres (same `rag_file_metadata` join as references), so the raw
+    `{job_id}_{basename}` key never surfaces in `/query/data`. Each field may be a GRAPH_FIELD_SEP-
+    joined list of keys for multi-source entities/relationships; every segment is resolved and the
+    SEP structure preserved. An unresolved segment falls back to a prefix-stripped basename so no
+    `{job_id}_` token / hex ever leaks. Mutates `data` in place."""
+    sep = _graph_field_sep()
+    blocks = [data.get("entities") or [], data.get("relationships") or [], data.get("chunks") or []]
+    keys: set[str] = set()
+    for block in blocks:
+        for item in block:
+            for seg in (item.get("file_path") or "").split(sep):
+                if seg.strip():
+                    keys.add(seg.strip())
+    if not keys:
+        return
+    meta_map = await _db_fetch_metadata_by_key(_db_pool, list(keys), phys) if _db_pool else {}
+
+    def _real(seg: str) -> str:
+        row = meta_map.get(seg)
+        return (row.get("file_path") if row else None) or _strip_job_prefix(seg)
+
+    for block in blocks:
+        for item in block:
+            fp = item.get("file_path")
+            if not fp:
+                continue
+            item["file_path"] = sep.join(
+                _real(seg.strip()) for seg in fp.split(sep) if seg.strip())
+
+
 async def _build_references(
     raw_references: list[dict] | None, phys: str | None = None, answered_model: str | None = None
 ) -> tuple[list[dict], dict[str, dict]]:
@@ -790,10 +835,9 @@ async def _build_references(
     /query and /query/data. Returns `(references, meta_map)` where `meta_map` is the internal
     key→row map (used by /query to rewrite the answer prose; never emitted in any response).
 
-    References expose only real, user-meaningful values: `file_path` is the caller's openable path
-    and `file_name` the clean original filename. LightRAG's internal name / our join key are NEVER
-    emitted; when a reference can't be resolved to a row, `file_path`/`file_name` are null (we do
-    not echo LightRAG's raw internal value).
+    References expose only the real, openable `file_path` (from Postgres) plus enrichment.
+    LightRAG's internal name / our join key are NEVER emitted; when a reference can't be resolved
+    to a row, `file_path` is null (we do not echo LightRAG's raw internal value).
 
     `answered_model` is the text LLM that synthesised the answer for THIS query; added as
     `llm_model_answered` only when supplied (so /query/data, which generates no answer, omits it)."""
@@ -809,7 +853,6 @@ async def _build_references(
         out = {
             "reference_id": ref.get("reference_id"),
             "file_path": m.get("file_path") if m else None,   # REAL path only; never the key
-            "file_name": m.get("file") if m else None,        # clean original filename only
             "job_id": m.get("job_id") if m else None,
             "file_description": m.get("description") if m else None,
             "last_modified_time": m.get("last_modified_time") if m else None,
@@ -1858,8 +1901,7 @@ async def delete_file(body: FileDeleteRequest, ws: dict = Depends(require_worksp
         "Run a RAG query against the workspace and return a synthesised natural-language answer. "
         "When `include_references` is true, the response also lists the source documents used — "
         "each reference's `file_path` is the **real, openable document path** you supplied at upload "
-        "(resolved server-side from Postgres), and `file_name` the original filename; neither is "
-        "LightRAG's internal name. "
+        "(resolved server-side from Postgres), never LightRAG's internal name. "
         "For raw retrieved entities/relationships/chunks instead of a prose answer, use `/query/data`."
     ),
     responses={404: {"description": "Workspace not found or soft-deleted"}},
@@ -1920,6 +1962,9 @@ async def query_data(req: QueryDataRequest, ws: dict = Depends(require_workspace
         raise _internal_error(exc, "query/data") from exc
 
     data = raw.get("data") or {}
+    # Resolve internal LightRAG keys in entity/relationship/chunk file_path -> real Postgres paths
+    # BEFORE filtering, so file_path_contains matches the real path consistently with references.
+    await _resolve_block_file_paths(data, ws["lightrag_workspace"])
     if needles:
         data["entities"] = [
             e for e in (data.get("entities") or []) if _path_matches_any(e.get("file_path"), needles)]

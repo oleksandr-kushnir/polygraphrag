@@ -832,11 +832,11 @@ async def test_query_references_parsed_from_aquery_llm(client):
     assert data["result"] == "answer text"
     refs = data["references"]
     assert len(refs) == 2
-    # Unresolvable references (no metadata row): file_path/file_name are null — we NEVER echo
+    # Unresolvable references (no metadata row): file_path is null — we NEVER echo
     # LightRAG's raw internal value. reference_id + answering model are still present.
     assert refs[0]["reference_id"] == "1"
     assert refs[0]["file_path"] is None
-    assert refs[0]["file_name"] is None
+    assert "file_name" not in refs[0]  # file_name is no longer emitted at all
     assert refs[0]["file_description"] is None and refs[0]["job_id"] is None
     assert "source_path" not in refs[0]
     assert refs[0]["llm_model_extracted"] is None  # no DB row -> unknown extractor
@@ -890,7 +890,7 @@ async def test_query_references_unknown_format(client):
     ref = resp.json()["references"][0]
     assert ref["job_id"] is None
     # No metadata row -> unresolved; never surface LightRAG's internal name.
-    assert ref["file_name"] is None
+    assert "file_name" not in ref  # file_name is no longer emitted at all
     assert ref["file_path"] is None
 
 
@@ -1015,7 +1015,7 @@ async def test_query_references_enriched_from_db(client):
     assert resp.status_code == 200
     ref = resp.json()["references"][0]
     assert ref["file_path"] == "/opt/data/workspace/Tag_1.pdf"  # resolved real, openable path
-    assert ref["file_name"] == "Tag_1.pdf"
+    assert "file_name" not in ref  # file_name is no longer emitted at all
     assert ref["file_description"] == "Q1 strategy"
     assert "source_path" not in ref  # dropped from references
     assert ref["last_modified_time"] == "2026-04-01T10:00:00"
@@ -1172,7 +1172,7 @@ async def test_query_data_references_parsed_and_enriched(client):
     resp = await client.post(f"{WS}/query/data", json={"query": "test"})
     assert resp.status_code == 200
     ref = resp.json()["data"]["references"][0]
-    assert ref["file_name"] == "Tag_1.pdf"
+    assert "file_name" not in ref  # file_name is no longer emitted at all
     assert ref["file_path"] == "/opt/data/workspace/Tag_1.pdf"
     assert ref["file_description"] == "Q1 strategy"
     assert "source_path" not in ref  # dropped from references
@@ -1180,6 +1180,46 @@ async def test_query_data_references_parsed_and_enriched(client):
     assert ref["llm_model_extracted"] == "deepseek/deepseek-v4-flash"
     # /query/data performs no synthesis -> no answering model on its references
     assert "llm_model_answered" not in ref
+    _mock_pool.fetch.return_value = []  # restore default
+
+
+@pytest.mark.asyncio
+async def test_query_data_block_file_paths_resolved_to_real(client):
+    """Entities/relationships/chunks show the REAL Postgres path, not LightRAG's internal key.
+    Multi-source <SEP>-joined lists resolve segment-by-segment (SEP preserved); an unresolved
+    segment falls back to a prefix-stripped basename so no {job_id}_ token surfaces. References
+    carry the real path and no file_name."""
+    server._db_pool = _mock_pool
+    _mock_pool.fetch.reset_mock()
+    _mock_pool.fetch.return_value = [
+        _meta_row("aa11beef_overview.txt", "/corpus/helix/docs/overview.txt", "overview.txt"),
+        _meta_row("bb22cafe_memo.txt", "/corpus/helix/docs/memo.txt", "memo.txt"),
+    ]
+    rag_stub.lightrag.aquery_data.return_value = {
+        "status": "success", "message": "ok",
+        "data": {
+            "entities": [
+                {"entity_name": "Helix", "file_path": "aa11beef_overview.txt<SEP>bb22cafe_memo.txt"},
+                {"entity_name": "Orphan", "file_path": "cc33dead_ghost.txt"},  # no row -> fallback
+            ],
+            "relationships": [{"src_id": "A", "tgt_id": "B", "file_path": "bb22cafe_memo.txt"}],
+            "chunks": [{"content": "c1", "file_path": "aa11beef_overview.txt"}],
+            "references": [{"reference_id": "1", "file_path": "aa11beef_overview.txt"}],
+        },
+        "metadata": {},
+    }
+    data = (await client.post(f"{WS}/query/data", json={"query": "t"})).json()["data"]
+    # multi-source entity -> both real paths, <SEP> structure preserved
+    assert data["entities"][0]["file_path"] == \
+        "/corpus/helix/docs/overview.txt<SEP>/corpus/helix/docs/memo.txt"
+    # unresolved segment -> {job_id}_ prefix stripped (no hex token surfaces)
+    assert data["entities"][1]["file_path"] == "ghost.txt"
+    assert data["relationships"][0]["file_path"] == "/corpus/helix/docs/memo.txt"
+    assert data["chunks"][0]["file_path"] == "/corpus/helix/docs/overview.txt"
+    blob = str(data["entities"] + data["relationships"] + data["chunks"])
+    assert "aa11beef_" not in blob and "bb22cafe_" not in blob and "cc33dead_" not in blob
+    ref = data["references"][0]
+    assert ref["file_path"] == "/corpus/helix/docs/overview.txt" and "file_name" not in ref
     _mock_pool.fetch.return_value = []  # restore default
 
 
@@ -2722,7 +2762,7 @@ async def test_reference_resolves_basename_key_to_real_path(client):
     }
     ref = (await client.post(f"{WS}/query", json={"query": "t"})).json()["references"][0]
     assert ref["file_path"] == "/corpus/career/cv.pdf"
-    assert ref["file_name"] == "cv.pdf"
+    assert "file_name" not in ref  # file_name is no longer emitted at all
     assert ref["job_id"] == "ab12" and ref["file_description"] == "CV"
     assert "lightrag_key" not in ref and "ab12_cv.pdf" not in str(ref)
     _mock_pool.fetch.return_value = []
