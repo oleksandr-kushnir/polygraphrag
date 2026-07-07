@@ -8,6 +8,14 @@
 raganything[all]
 lightrag-hku==1.5.4
 
+# MinerU is pulled in transitively (raganything[all] -> mineru[core]) and does
+# the document layout parsing / OCR. Pin >=3.1.0 so we resolve to the MinerU
+# Open Source License (Apache-2.0 based); MinerU releases before 3.1.0 were
+# AGPL-3.0, whose network-copyleft terms we do not want for a hosted service.
+# The license also requires that PolyGraphRAG attribute MinerU in its UI/docs
+# (see NOTICE / THIRD_PARTY_LICENSES.md).
+mineru>=3.1.0
+
 # Web layer
 fastapi
 uvicorn[standard]

@@ -204,4 +204,6 @@ The one bug that used to force this project to vendor a 6,700-line fork of Light
 
 ## Credits & license
 
-PolyGraphRAG is a service layer over [RAG-Anything](https://github.com/HKUDS/RAG-Anything) and [LightRAG](https://github.com/HKUDS/LightRAG) (both MIT) by HKUDS — full attribution in [NOTICE](NOTICE). Licensed under the [MIT License](LICENSE).
+PolyGraphRAG is a service layer over [RAG-Anything](https://github.com/HKUDS/RAG-Anything) and [LightRAG](https://github.com/HKUDS/LightRAG) (both MIT) by HKUDS. **Document parsing is powered by [MinerU](https://github.com/opendatalab/MinerU)** ([MinerU Open Source License](https://github.com/opendatalab/MinerU/blob/master/LICENSE.md), Apache-2.0 based) by OpenDataLab.
+
+Full attribution and the third-party license inventory are in [NOTICE](NOTICE) and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md). PolyGraphRAG's own code is licensed under the [MIT License](LICENSE).

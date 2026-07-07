@@ -11,6 +11,25 @@ projects, which remain the property of their respective authors:
       Knowledge-graph construction, dual-level retrieval, and the Postgres
       (pgvector + Apache AGE) storage backends.
 
+  - MinerU — https://github.com/opendatalab/MinerU (MinerU Open Source
+      License, a custom license based on Apache-2.0)
+      Document layout parsing / OCR, pulled in transitively via RAG-Anything
+      (raganything[all] -> mineru[core]) and used to parse uploaded documents.
+
+      ATTRIBUTION REQUIRED. The MinerU Open Source License requires that any
+      online service provided to third parties "based on MinerU" clearly and
+      prominently indicate, in the service interface or public documentation,
+      that MinerU is used. This NOTICE and the PolyGraphRAG README both state
+      that document parsing is powered by MinerU. Failure to attribute
+      terminates the license automatically. A separate commercial license is
+      required only above 100M monthly active users or USD 20M monthly revenue
+      (not applicable here). PolyGraphRAG pins mineru>=3.1.0 to stay on this
+      Apache-based license; earlier MinerU releases were AGPL-3.0.
+
+A full inventory of bundled third-party components and their licenses —
+required when redistributing the built Docker image — is in
+THIRD_PARTY_LICENSES.md.
+
 PolyGraphRAG adds a production FastAPI service around these libraries:
 multi-workspace isolation, asynchronous ingest-job tracking, per-role model
 provider routing, file management, and interactive graph visualization.
