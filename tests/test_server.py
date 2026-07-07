@@ -2213,6 +2213,7 @@ async def test_workspace_status(client):
     assert data["active"] is True
     assert data["documents"]["by_status"] == {"processed": 3, "failed": 1}
     assert data["documents"]["total"] == 4
+    assert "lightrag_workspace" not in data   # internal storage namespace never leaks to the API
 
 
 @pytest.mark.asyncio

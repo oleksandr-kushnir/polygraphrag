@@ -1546,7 +1546,6 @@ async def workspace_status(
         "id": row["id"],
         "name": row["name"],
         "description": row["description"],
-        "lightrag_workspace": phys,
         "is_primary": row["is_primary"],
         "active": row["deleted_at"] is None,
         "documents": {"by_status": docs_by_status, "total": sum(docs_by_status.values())},
