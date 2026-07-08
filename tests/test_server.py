@@ -1722,7 +1722,7 @@ async def test_batch_json_metadata_per_file(tmp_path, client):
     # lightrag_key (arg 10) is the {job_id}_{basename} identity; llm_model_extracted moved to arg 11.
     assert args0[10] == f"{args0[1]}_{args0[4]}" and args1[10] == f"{args1[1]}_{args1[4]}"
     assert (
-        args0[11] == server.LLM_MODEL and args1[11] == server.LLM_MODEL
+        args0[11] == server.config.LLM_MODEL and args1[11] == server.config.LLM_MODEL
     )  # extractor captured at ingest
 
 
@@ -1750,7 +1750,7 @@ async def test_db_init_creates_both_tables():
 
 @pytest.mark.asyncio
 async def test_db_init_adds_workspace_column_backfills_and_enforces_not_null(monkeypatch):
-    monkeypatch.setattr(server, "POSTGRES_WORKSPACE", "default")
+    monkeypatch.setattr(server.config, "POSTGRES_WORKSPACE", "default")
     pool = _fresh_pool()
     await server._db_init(pool)
     stmts = list(pool.execute.call_args_list)
@@ -1780,15 +1780,15 @@ async def test_db_init_workspace_column_has_no_default():
 
 @pytest.mark.asyncio
 async def test_db_init_seeds_primary_default_when_absent(monkeypatch):
-    monkeypatch.setattr(server, "POSTGRES_WORKSPACE", "default")
+    monkeypatch.setattr(server.config, "POSTGRES_WORKSPACE", "default")
     pool = _fresh_pool(primary_row=None)
     await server._db_init(pool)
     inserts = [c for c in pool.execute.call_args_list if "INSERT INTO rag_workspaces" in str(c)]
     # The primary workspace seed runs when no primary row exists yet.
     assert len(inserts) >= 1
     args = inserts[0].args
-    assert server.PRIMARY_WORKSPACE_ID in args  # "default"
-    assert server.PRIMARY_WORKSPACE_DESCRIPTION in args
+    assert server.config.PRIMARY_WORKSPACE_ID in args  # "default"
+    assert server.config.PRIMARY_WORKSPACE_DESCRIPTION in args
     assert "default" in args  # physical lightrag_workspace == POSTGRES_WORKSPACE
 
 
@@ -1801,8 +1801,8 @@ async def test_db_init_does_not_reseed_when_primary_exists():
 
 
 def test_primary_workspace_constants():
-    assert server.PRIMARY_WORKSPACE_ID == "default"
-    assert server.PRIMARY_WORKSPACE_DESCRIPTION == "Default workspace."
+    assert server.config.PRIMARY_WORKSPACE_ID == "default"
+    assert server.config.PRIMARY_WORKSPACE_DESCRIPTION == "Default workspace."
 
 
 # --------------------------------------------------------------------------- #
