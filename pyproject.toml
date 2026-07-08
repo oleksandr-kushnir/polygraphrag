@@ -1,0 +1,44 @@
+[project]
+name = "polygraphrag"
+version = "0.1.0"
+description = "Multi-workspace GraphRAG service (LightRAG + RAG-Anything) over an OpenAI-compatible stack."
+requires-python = ">=3.11"
+# Runtime and test dependencies remain in requirements.txt / requirements-dev.txt:
+# the Docker image installs from them and they carry per-package licensing rationale
+# (MinerU / lightrag-hku pins). This file is the manifest for tooling config below.
+
+[tool.black]
+line-length = 100
+target-version = ["py311", "py312", "py313"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv", "db", "docs"]
+
+[tool.ruff.lint]
+# E/F: pycodestyle + pyflakes core. I: import sorting (isort).
+select = ["E", "F", "I"]
+# Line length is enforced by black's formatting; ruff should not also flag E501,
+# which would only fire on long string literals black intentionally leaves intact.
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# E402 (import-not-at-top) is intentional in these files: server configures logging
+# before importing libraries that log at import time, and the test/smoke harnesses stub
+# heavy deps into sys.modules before `import server`.
+"server.py" = ["E402"]
+"smoke_test.py" = ["E402"]
+"tests/*" = ["E402"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+# Third-party stack (raganything, lightrag) ships without type stubs; keep mypy
+# focused on our own code rather than failing on their untyped surface.
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+filterwarnings = ["ignore::DeprecationWarning"]

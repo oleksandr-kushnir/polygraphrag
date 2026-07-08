@@ -3,23 +3,23 @@ Tests for server.py — run inside the container:
     pip install pytest pytest-asyncio httpx
     pytest test_server.py -v
 """
+
 import asyncio
 import io
 import logging
-import os
-import tempfile
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch, call
-
-import pytest
-import pytest_asyncio
 
 # --------------------------------------------------------------------------- #
 # Minimal stubs so server.py can be imported without real Postgres / OpenAI
 # --------------------------------------------------------------------------- #
-
 # Stub RAGAnything before the real import happens
 import sys
+import tempfile
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+import pytest_asyncio
+
 _DEFAULT_AQUERY_LLM = {
     "status": "success",
     "data": {"references": [], "chunks": [], "entities": [], "relationships": []},
@@ -41,9 +41,14 @@ class _AnyKeyDocs(dict):
     """Stand-in for aget_docs_by_ids' return: yields a processed doc-status for any doc id
     (the real doc id is computed from content, which is opaque to tests). LightRAG's PG storage
     returns each doc-status as a plain dict, which is what we mirror here."""
+
     def __init__(self, doc=None):
         super().__init__()
-        self._doc = doc if doc is not None else {"status": "processed", "content_length": 11, "metadata": {}}
+        self._doc = (
+            doc
+            if doc is not None
+            else {"status": "processed", "content_length": 11, "metadata": {}}
+        )
 
     def get(self, key, default=None):
         return self._doc
@@ -81,7 +86,6 @@ sys.modules.setdefault("lightrag", lightrag_mod)
 sys.modules.setdefault("lightrag.utils", lightrag_utils_mod)
 
 import server  # noqa: E402 — must come after stubs
-
 
 # --------------------------------------------------------------------------- #
 # Fixtures
@@ -138,8 +142,11 @@ WS = "/workspace/alex"
 async def _fake_lookup_workspace(workspace_id):
     """Stub: every workspace looks active and present, mapping id→id physically."""
     return {
-        "id": workspace_id, "name": workspace_id, "description": None,
-        "lightrag_workspace": workspace_id, "is_primary": workspace_id == "alex",
+        "id": workspace_id,
+        "name": workspace_id,
+        "description": None,
+        "lightrag_workspace": workspace_id,
+        "is_primary": workspace_id == "alex",
     }
 
 
@@ -147,13 +154,16 @@ async def _fake_lookup_workspace(workspace_id):
 async def client():
     """Async httpx test client that bypasses lifespan. Stubs the workspace registry so
     `/workspace/{id}/...` routes resolve and `get_workspace_rag` returns the shared stub."""
-    from httpx import AsyncClient, ASGITransport
+    from httpx import ASGITransport, AsyncClient
+
     orig_lookup = server._lookup_workspace
     orig_get = server.get_workspace_rag
     server._lookup_workspace = _fake_lookup_workspace
     server.get_workspace_rag = AsyncMock(return_value=rag_stub)
     try:
-        async with AsyncClient(transport=ASGITransport(app=server.app), base_url="http://test") as c:
+        async with AsyncClient(
+            transport=ASGITransport(app=server.app), base_url="http://test"
+        ) as c:
             yield c
     finally:
         server._lookup_workspace = orig_lookup
@@ -167,6 +177,7 @@ def _fake_upload(filename: str, content: bytes = b"hello") -> dict:
 # --------------------------------------------------------------------------- #
 # Unit — routing (_process_file dispatch)
 # --------------------------------------------------------------------------- #
+
 
 @pytest.mark.asyncio
 async def test_routes_pdf_to_vision(tmp_path):
@@ -200,28 +211,30 @@ async def test_routes_audio_to_whisper(tmp_path, ext):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ext", [".docx", ".xlsx", ".pptx"])
 async def test_routes_office_converts_then_vision(tmp_path, ext):
-    import tempfile
     path = tmp_path / f"office{ext}"
     path.write_bytes(b"PK\x03\x04")
     pdf_dir = Path(tempfile.mkdtemp())
     fake_pdf = pdf_dir / "office.pdf"
     fake_pdf.write_bytes(b"%PDF")
-    with patch.object(server, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)), \
-         patch.object(server, "_extract_with_vision", new=AsyncMock(return_value="text")) as mv:
+    with (
+        patch.object(server, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)),
+        patch.object(server, "_extract_with_vision", new=AsyncMock(return_value="text")) as mv,
+    ):
         await server._process_file(path, rag_stub)
     mv.assert_awaited_once_with(fake_pdf)
 
 
 @pytest.mark.asyncio
 async def test_office_temp_pdf_deleted_on_success(tmp_path):
-    import tempfile
     path = tmp_path / "slides.pptx"
     path.write_bytes(b"PK\x03\x04")
     pdf_dir = Path(tempfile.mkdtemp())
     fake_pdf = pdf_dir / "slides.pdf"
     fake_pdf.write_bytes(b"%PDF")
-    with patch.object(server, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)), \
-         patch.object(server, "_extract_with_vision", new=AsyncMock(return_value="text")):
+    with (
+        patch.object(server, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)),
+        patch.object(server, "_extract_with_vision", new=AsyncMock(return_value="text")),
+    ):
         await server._process_file(path, rag_stub)
     assert not fake_pdf.exists()
     assert not pdf_dir.exists()
@@ -229,14 +242,17 @@ async def test_office_temp_pdf_deleted_on_success(tmp_path):
 
 @pytest.mark.asyncio
 async def test_office_temp_pdf_deleted_on_vision_error(tmp_path):
-    import tempfile
     path = tmp_path / "slides.pptx"
     path.write_bytes(b"PK\x03\x04")
     pdf_dir = Path(tempfile.mkdtemp())
     fake_pdf = pdf_dir / "slides.pdf"
     fake_pdf.write_bytes(b"%PDF")
-    with patch.object(server, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)), \
-         patch.object(server, "_extract_with_vision", new=AsyncMock(side_effect=RuntimeError("vision fail"))):
+    with (
+        patch.object(server, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)),
+        patch.object(
+            server, "_extract_with_vision", new=AsyncMock(side_effect=RuntimeError("vision fail"))
+        ),
+    ):
         with pytest.raises(RuntimeError):
             await server._process_file(path, rag_stub)
     assert not fake_pdf.exists()
@@ -253,28 +269,30 @@ async def test_xlsx_over_10mb_raises(tmp_path):
 
 @pytest.mark.asyncio
 async def test_xlsx_under_10mb_proceeds(tmp_path):
-    import tempfile
     path = tmp_path / "small.xlsx"
     path.write_bytes(b"PK\x03\x04")
     pdf_dir = Path(tempfile.mkdtemp())
     fake_pdf = pdf_dir / "small.pdf"
     fake_pdf.write_bytes(b"%PDF")
-    with patch.object(server, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)), \
-         patch.object(server, "_extract_with_vision", new=AsyncMock(return_value="text")) as mv:
+    with (
+        patch.object(server, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)),
+        patch.object(server, "_extract_with_vision", new=AsyncMock(return_value="text")) as mv,
+    ):
         await server._process_file(path, rag_stub)
     mv.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_xlsx_size_limit_only_applies_to_xlsx(tmp_path):
-    import tempfile
     path = tmp_path / "big.docx"
     path.write_bytes(b"x" * (11 * 1024 * 1024))
     pdf_dir = Path(tempfile.mkdtemp())
     fake_pdf = pdf_dir / "big.pdf"
     fake_pdf.write_bytes(b"%PDF")
-    with patch.object(server, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)), \
-         patch.object(server, "_extract_with_vision", new=AsyncMock(return_value="text")) as mv:
+    with (
+        patch.object(server, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)),
+        patch.object(server, "_extract_with_vision", new=AsyncMock(return_value="text")) as mv,
+    ):
         await server._process_file(path, rag_stub)
     mv.assert_awaited_once()
 
@@ -302,10 +320,13 @@ async def test_routes_unknown_extension_to_fallback(tmp_path):
 # Unit — file storage
 # --------------------------------------------------------------------------- #
 
+
 @pytest.mark.asyncio
 async def test_saved_path_uses_job_id_prefix(tmp_path, client):
-    with patch.object(server, "WORKING_DIR", str(tmp_path)), \
-         patch.object(server, "_process_file", new=AsyncMock()):
+    with (
+        patch.object(server, "WORKING_DIR", str(tmp_path)),
+        patch.object(server, "_process_file", new=AsyncMock()),
+    ):
         resp = await client.post(f"{WS}/upload/batch", files=[_fake_upload("report.pdf")])
     data = resp.json()
     job_id = data["jobs"][0]["job_id"]
@@ -315,8 +336,10 @@ async def test_saved_path_uses_job_id_prefix(tmp_path, client):
 
 @pytest.mark.asyncio
 async def test_same_filename_no_collision(tmp_path, client):
-    with patch.object(server, "WORKING_DIR", str(tmp_path)), \
-         patch.object(server, "_process_file", new=AsyncMock()):
+    with (
+        patch.object(server, "WORKING_DIR", str(tmp_path)),
+        patch.object(server, "_process_file", new=AsyncMock()),
+    ):
         r1 = await client.post(f"{WS}/upload/batch", files=[_fake_upload("report.pdf", b"v1")])
         r2 = await client.post(f"{WS}/upload/batch", files=[_fake_upload("report.pdf", b"v2")])
     j1 = r1.json()["jobs"][0]["job_id"]
@@ -331,12 +354,22 @@ async def test_failed_permanently_file_deleted(tmp_path):
     path = tmp_path / "aaa_file.txt"
     path.write_text("content")
     job_id = "aaa"
-    server._jobs[job_id] = {"job_id": job_id, "file": "file.txt", "workspace": "alex", "status": "pending", "attempts": 0, "error": None, "batch_id": "b"}
+    server._jobs[job_id] = {
+        "job_id": job_id,
+        "file": "file.txt",
+        "workspace": "alex",
+        "status": "pending",
+        "attempts": 0,
+        "error": None,
+        "batch_id": "b",
+    }
 
     original_max = server.MAX_RETRIES
     server.MAX_RETRIES = 1
-    with patch.object(server, "_process_file", new=AsyncMock(side_effect=RuntimeError("fail"))), \
-         patch.object(server, "get_workspace_rag", new=AsyncMock(return_value=rag_stub)):
+    with (
+        patch.object(server, "_process_file", new=AsyncMock(side_effect=RuntimeError("fail"))),
+        patch.object(server, "get_workspace_rag", new=AsyncMock(return_value=rag_stub)),
+    ):
         await server._process_job("alex", job_id, path, "")
 
     server.MAX_RETRIES = original_max
@@ -350,9 +383,19 @@ async def test_successful_job_file_deleted(tmp_path):
     path = tmp_path / "aaa_file.txt"
     path.write_text("content")
     job_id = "aaa_ok"
-    server._jobs[job_id] = {"job_id": job_id, "file": "file.txt", "workspace": "alex", "status": "pending", "attempts": 0, "error": None, "batch_id": "b"}
-    with patch.object(server, "_process_file", new=AsyncMock(return_value="doc-x")), \
-         patch.object(server, "get_workspace_rag", new=AsyncMock(return_value=rag_stub)):
+    server._jobs[job_id] = {
+        "job_id": job_id,
+        "file": "file.txt",
+        "workspace": "alex",
+        "status": "pending",
+        "attempts": 0,
+        "error": None,
+        "batch_id": "b",
+    }
+    with (
+        patch.object(server, "_process_file", new=AsyncMock(return_value="doc-x")),
+        patch.object(server, "get_workspace_rag", new=AsyncMock(return_value=rag_stub)),
+    ):
         await server._process_job("alex", job_id, path, "")
     assert not path.exists()
     assert server._jobs[job_id]["status"] == "done"
@@ -362,11 +405,16 @@ async def test_successful_job_file_deleted(tmp_path):
 # Unit — retry logic
 # --------------------------------------------------------------------------- #
 
-async def _run_worker_until_terminal(job_id: str, dest: Path, metadata: str, process_mock: AsyncMock):
+
+async def _run_worker_until_terminal(
+    job_id: str, dest: Path, metadata: str, process_mock: AsyncMock
+):
     """Drive the worker loop manually until the job reaches a terminal state, using the
     real _process_job (with _process_file + get_workspace_rag stubbed)."""
-    with patch.object(server, "_process_file", process_mock), \
-         patch.object(server, "get_workspace_rag", AsyncMock(return_value=rag_stub)):
+    with (
+        patch.object(server, "_process_file", process_mock),
+        patch.object(server, "get_workspace_rag", AsyncMock(return_value=rag_stub)),
+    ):
         while server._jobs[job_id]["status"] not in ("done", "failed"):
             if server._job_queue.empty():
                 break
@@ -382,10 +430,18 @@ async def test_retry_on_transient_error(tmp_path):
     path = tmp_path / "file.txt"
     path.write_text("x")
     job_id = "retry1"
-    server._jobs[job_id] = {"job_id": job_id, "file": "file.txt", "status": "pending", "attempts": 0, "error": None, "batch_id": "b"}
+    server._jobs[job_id] = {
+        "job_id": job_id,
+        "file": "file.txt",
+        "status": "pending",
+        "attempts": 0,
+        "error": None,
+        "batch_id": "b",
+    }
     await server._job_queue.put(("alex", job_id, path, "", None))
 
     call_count = 0
+
     async def _fail_once(p, rag_instance=None, description_text="", file_path=None):
         nonlocal call_count
         call_count += 1
@@ -402,7 +458,14 @@ async def test_retry_up_to_max_retries_5(tmp_path):
     path = tmp_path / "fail.txt"
     path.write_text("x")
     job_id = "always_fail"
-    server._jobs[job_id] = {"job_id": job_id, "file": "fail.txt", "status": "pending", "attempts": 0, "error": None, "batch_id": "b"}
+    server._jobs[job_id] = {
+        "job_id": job_id,
+        "file": "fail.txt",
+        "status": "pending",
+        "attempts": 0,
+        "error": None,
+        "batch_id": "b",
+    }
     await server._job_queue.put(("alex", job_id, path, "", None))
     original = server.MAX_RETRIES
     server.MAX_RETRIES = 5
@@ -419,10 +482,18 @@ async def test_success_on_second_attempt(tmp_path):
     path = tmp_path / "retry2.txt"
     path.write_text("x")
     job_id = "retry2"
-    server._jobs[job_id] = {"job_id": job_id, "file": "retry2.txt", "status": "pending", "attempts": 0, "error": None, "batch_id": "b"}
+    server._jobs[job_id] = {
+        "job_id": job_id,
+        "file": "retry2.txt",
+        "status": "pending",
+        "attempts": 0,
+        "error": None,
+        "batch_id": "b",
+    }
     await server._job_queue.put(("alex", job_id, path, "", None))
 
     call_count = 0
+
     async def _fail_once(p, rag_instance=None, description_text="", file_path=None):
         nonlocal call_count
         call_count += 1
@@ -439,7 +510,14 @@ async def test_max_retries_env_var_override(tmp_path, monkeypatch):
     path = tmp_path / "env_retry.txt"
     path.write_text("x")
     job_id = "env_fail"
-    server._jobs[job_id] = {"job_id": job_id, "file": "env_retry.txt", "status": "pending", "attempts": 0, "error": None, "batch_id": "b"}
+    server._jobs[job_id] = {
+        "job_id": job_id,
+        "file": "env_retry.txt",
+        "status": "pending",
+        "attempts": 0,
+        "error": None,
+        "batch_id": "b",
+    }
     await server._job_queue.put(("alex", job_id, path, "", None))
     original = server.MAX_RETRIES
     server.MAX_RETRIES = 2
@@ -455,12 +533,20 @@ async def test_error_field_reflects_last_attempt(tmp_path):
     path = tmp_path / "errmsg.txt"
     path.write_text("x")
     job_id = "errmsg"
-    server._jobs[job_id] = {"job_id": job_id, "file": "errmsg.txt", "status": "pending", "attempts": 0, "error": None, "batch_id": "b"}
+    server._jobs[job_id] = {
+        "job_id": job_id,
+        "file": "errmsg.txt",
+        "status": "pending",
+        "attempts": 0,
+        "error": None,
+        "batch_id": "b",
+    }
     await server._job_queue.put(("alex", job_id, path, "", None))
     original = server.MAX_RETRIES
     server.MAX_RETRIES = 2
 
     attempt = 0
+
     async def _variable_error(p, rag_instance=None, description_text="", file_path=None):
         nonlocal attempt
         attempt += 1
@@ -474,6 +560,7 @@ async def test_error_field_reflects_last_attempt(tmp_path):
 # --------------------------------------------------------------------------- #
 # Unit — state machine helpers
 # --------------------------------------------------------------------------- #
+
 
 def test_build_metadata_returns_description_only():
     result = server._build_metadata("My desc", "/path/to/file", "2026-01-01")
@@ -509,6 +596,7 @@ def test_batch_summary_counts():
 # Integration — HTTP endpoints
 # --------------------------------------------------------------------------- #
 
+
 @pytest.mark.asyncio
 async def test_health_unchanged(client):
     resp = await client.get("/health")
@@ -527,8 +615,10 @@ async def test_query_unchanged(client):
 
 @pytest.mark.asyncio
 async def test_batch_single_file_returns_batch_id(tmp_path, client):
-    with patch.object(server, "WORKING_DIR", str(tmp_path)), \
-         patch.object(server, "_process_file", new=AsyncMock()):
+    with (
+        patch.object(server, "WORKING_DIR", str(tmp_path)),
+        patch.object(server, "_process_file", new=AsyncMock()),
+    ):
         resp = await client.post(f"{WS}/upload/batch", files=[_fake_upload("test.pdf")])
     assert resp.status_code == 200
     data = resp.json()
@@ -540,8 +630,10 @@ async def test_batch_single_file_returns_batch_id(tmp_path, client):
 @pytest.mark.asyncio
 async def test_batch_20_files_all_enqueued(tmp_path, client):
     files = [_fake_upload(f"file{i}.txt", b"x") for i in range(20)]
-    with patch.object(server, "WORKING_DIR", str(tmp_path)), \
-         patch.object(server, "_process_file", new=AsyncMock()):
+    with (
+        patch.object(server, "WORKING_DIR", str(tmp_path)),
+        patch.object(server, "_process_file", new=AsyncMock()),
+    ):
         resp = await client.post(f"{WS}/upload/batch", files=files)
     data = resp.json()
     assert len(data["jobs"]) == 20
@@ -563,14 +655,7 @@ async def test_batch_partial_save_failure_no_abort(tmp_path, client):
 
     files = [_fake_upload(f"f{i}.txt") for i in range(5)]
 
-    original_init = server.upload_batch
-
-    # Patch the read of the 3rd file to raise
-    upload_calls = []
-    async def _patched_upload(**kwargs):
-        pass
-
-    # Simulate by patching Path.open to fail on 3rd file write
+    # Simulate a mid-batch failure by patching Path.open to fail on the 3rd file write
     open_call = 0
     real_open = Path.open
 
@@ -582,9 +667,11 @@ async def test_batch_partial_save_failure_no_abort(tmp_path, client):
                 raise OSError("disk full")
         return real_open(self, mode, **kw)
 
-    with patch.object(server, "WORKING_DIR", str(tmp_path)), \
-         patch.object(server, "_process_file", new=AsyncMock()), \
-         patch.object(Path, "open", _counting_open):
+    with (
+        patch.object(server, "WORKING_DIR", str(tmp_path)),
+        patch.object(server, "_process_file", new=AsyncMock()),
+        patch.object(Path, "open", _counting_open),
+    ):
         resp = await client.post(f"{WS}/upload/batch", files=files)
     data = resp.json()
     assert resp.status_code == 200
@@ -597,8 +684,10 @@ async def test_batch_partial_save_failure_no_abort(tmp_path, client):
 @pytest.mark.asyncio
 async def test_batch_response_has_summary_counts(tmp_path, client):
     files = [_fake_upload(f"f{i}.txt") for i in range(3)]
-    with patch.object(server, "WORKING_DIR", str(tmp_path)), \
-         patch.object(server, "_process_file", new=AsyncMock()):
+    with (
+        patch.object(server, "WORKING_DIR", str(tmp_path)),
+        patch.object(server, "_process_file", new=AsyncMock()),
+    ):
         resp = await client.post(f"{WS}/upload/batch", files=files)
     s = resp.json()["summary"]
     assert s["total"] == 3
@@ -613,8 +702,10 @@ async def test_get_batch_404_unknown(client):
 
 @pytest.mark.asyncio
 async def test_status_pending_immediate(tmp_path, client):
-    with patch.object(server, "WORKING_DIR", str(tmp_path)), \
-         patch.object(server, "_process_file", new=AsyncMock()):
+    with (
+        patch.object(server, "WORKING_DIR", str(tmp_path)),
+        patch.object(server, "_process_file", new=AsyncMock()),
+    ):
         resp = await client.post(f"{WS}/upload/batch", files=[_fake_upload("f.txt")])
     job_id = resp.json()["jobs"][0]["job_id"]
     sr = await client.get(f"{WS}/status/{job_id}")
@@ -630,8 +721,10 @@ async def test_status_404_unknown_job(client):
 
 @pytest.mark.asyncio
 async def test_jobs_newest_first(tmp_path, client):
-    with patch.object(server, "WORKING_DIR", str(tmp_path)), \
-         patch.object(server, "_process_file", new=AsyncMock()):
+    with (
+        patch.object(server, "WORKING_DIR", str(tmp_path)),
+        patch.object(server, "_process_file", new=AsyncMock()),
+    ):
         r1 = await client.post(f"{WS}/upload/batch", files=[_fake_upload("first.txt")])
         r2 = await client.post(f"{WS}/upload/batch", files=[_fake_upload("second.txt")])
     jid1 = r1.json()["jobs"][0]["job_id"]
@@ -644,8 +737,10 @@ async def test_jobs_newest_first(tmp_path, client):
 @pytest.mark.asyncio
 async def test_jobs_capped_at_100(tmp_path, client):
     files = [_fake_upload(f"f{i}.txt") for i in range(110)]
-    with patch.object(server, "WORKING_DIR", str(tmp_path)), \
-         patch.object(server, "_process_file", new=AsyncMock()):
+    with (
+        patch.object(server, "WORKING_DIR", str(tmp_path)),
+        patch.object(server, "_process_file", new=AsyncMock()),
+    ):
         await client.post(f"{WS}/upload/batch", files=files)
     resp = await client.get(f"{WS}/jobs")
     assert len(resp.json()["jobs"]) == 100
@@ -655,11 +750,14 @@ async def test_jobs_capped_at_100(tmp_path, client):
 # Integration — worker drives jobs to terminal states
 # --------------------------------------------------------------------------- #
 
+
 async def _drain_queue(process_mock: AsyncMock):
     """Process all queued jobs via the real _process_job (with _process_file +
     get_workspace_rag stubbed)."""
-    with patch.object(server, "_process_file", process_mock), \
-         patch.object(server, "get_workspace_rag", AsyncMock(return_value=rag_stub)):
+    with (
+        patch.object(server, "_process_file", process_mock),
+        patch.object(server, "get_workspace_rag", AsyncMock(return_value=rag_stub)),
+    ):
         while not server._job_queue.empty():
             ws, job_id, dest, metadata, fp = await server._job_queue.get()
             try:
@@ -725,8 +823,10 @@ async def test_status_retrying_intermediate(tmp_path, client):
 
     # Process just one item — leaves it as retrying
     ws, j, d, m, fp = await server._job_queue.get()
-    with patch.object(server, "_process_file", AsyncMock(side_effect=_fail_first)), \
-         patch.object(server, "get_workspace_rag", AsyncMock(return_value=rag_stub)):
+    with (
+        patch.object(server, "_process_file", AsyncMock(side_effect=_fail_first)),
+        patch.object(server, "get_workspace_rag", AsyncMock(return_value=rag_stub)),
+    ):
         try:
             await server._process_job(ws, j, d, m, fp)
         finally:
@@ -745,6 +845,7 @@ async def test_status_retrying_intermediate(tmp_path, client):
 # --------------------------------------------------------------------------- #
 # Concurrency / stress
 # --------------------------------------------------------------------------- #
+
 
 @pytest.mark.asyncio
 async def test_10_concurrent_batches_all_done(tmp_path, client):
@@ -802,6 +903,7 @@ async def test_lock_prevents_overlap(tmp_path, client):
 # Query — structured references
 # --------------------------------------------------------------------------- #
 
+
 @pytest.mark.asyncio
 async def test_query_references_returned_by_default(client):
     resp = await client.post(f"{WS}/query", json={"query": "test"})
@@ -840,7 +942,9 @@ async def test_query_references_parsed_from_aquery_llm(client):
     assert refs[0]["file_description"] is None and refs[0]["job_id"] is None
     assert "source_path" not in refs[0]
     assert refs[0]["llm_model_extracted"] is None  # no DB row -> unknown extractor
-    assert refs[0]["llm_model_answered"] == server.QUERY_LLM_MODEL  # /query reports the query-time answering model
+    assert (
+        refs[0]["llm_model_answered"] == server.QUERY_LLM_MODEL
+    )  # /query reports the query-time answering model
     # The internal LightRAG key must not appear anywhere in the reference payload.
     assert "lightrag_key" not in refs[0]
     assert "Tag_1.pdf" not in str(refs[0])
@@ -862,9 +966,7 @@ async def test_query_references_empty_when_none(client):
 async def test_query_include_references_false(client):
     rag_stub.lightrag.aquery_llm.return_value = {
         "status": "success",
-        "data": {
-            "references": [{"reference_id": "1", "file_path": "20ed9a7c_Tag_1.pdf"}]
-        },
+        "data": {"references": [{"reference_id": "1", "file_path": "20ed9a7c_Tag_1.pdf"}]},
         "llm_response": {"content": "answer", "is_streaming": False},
         "metadata": {},
     }
@@ -880,9 +982,7 @@ async def test_query_include_references_false(client):
 async def test_query_references_unknown_format(client):
     rag_stub.lightrag.aquery_llm.return_value = {
         "status": "success",
-        "data": {
-            "references": [{"reference_id": "99", "file_path": "nodash.pdf"}]
-        },
+        "data": {"references": [{"reference_id": "99", "file_path": "nodash.pdf"}]},
         "llm_response": {"content": "answer", "is_streaming": False},
         "metadata": {},
     }
@@ -910,16 +1010,21 @@ async def test_query_result_field_is_llm_content(client):
 # DB persistence
 # --------------------------------------------------------------------------- #
 
+
 @pytest.mark.asyncio
 async def test_upload_calls_db_insert(tmp_path, client):
     server._db_pool = _mock_pool
     _mock_pool.execute.reset_mock()
-    with patch.object(server, "WORKING_DIR", str(tmp_path)), \
-         patch.object(server, "_process_file", new=AsyncMock()):
+    with (
+        patch.object(server, "WORKING_DIR", str(tmp_path)),
+        patch.object(server, "_process_file", new=AsyncMock()),
+    ):
         resp = await client.post(
             f"{WS}/upload/batch",
             files=[_fake_upload("report.pdf")],
-            data={"metadata": '[{"description":"Q1 doc","source_path":"/docs/report.pdf","last_modified_time":"2026-04-01T10:00:00"}]'},
+            data={
+                "metadata": '[{"description":"Q1 doc","source_path":"/docs/report.pdf","last_modified_time":"2026-04-01T10:00:00"}]'
+            },
         )
     assert resp.status_code == 200
     # INSERT should have been called
@@ -934,9 +1039,19 @@ async def test_worker_updates_db_on_done(tmp_path):
     path = tmp_path / "aaa_file.txt"
     path.write_text("content")
     job_id = "aaa"
-    server._jobs[job_id] = {"job_id": job_id, "file": "file.txt", "workspace": "alex", "status": "pending", "attempts": 0, "error": None, "batch_id": "b"}
-    with patch.object(server, "_process_file", new=AsyncMock()), \
-         patch.object(server, "get_workspace_rag", new=AsyncMock(return_value=rag_stub)):
+    server._jobs[job_id] = {
+        "job_id": job_id,
+        "file": "file.txt",
+        "workspace": "alex",
+        "status": "pending",
+        "attempts": 0,
+        "error": None,
+        "batch_id": "b",
+    }
+    with (
+        patch.object(server, "_process_file", new=AsyncMock()),
+        patch.object(server, "get_workspace_rag", new=AsyncMock(return_value=rag_stub)),
+    ):
         await server._process_job("alex", job_id, path, "")
 
     update_calls = [str(c) for c in _mock_pool.execute.call_args_list]
@@ -951,12 +1066,24 @@ async def test_worker_updates_db_on_failed(tmp_path):
     path = tmp_path / "bbb_fail.txt"
     path.write_text("x")
     job_id = "bbb"
-    server._jobs[job_id] = {"job_id": job_id, "file": "fail.txt", "workspace": "alex", "status": "pending", "attempts": 0, "error": None, "batch_id": "b"}
+    server._jobs[job_id] = {
+        "job_id": job_id,
+        "file": "fail.txt",
+        "workspace": "alex",
+        "status": "pending",
+        "attempts": 0,
+        "error": None,
+        "batch_id": "b",
+    }
 
     original = server.MAX_RETRIES
     server.MAX_RETRIES = 1
-    with patch.object(server, "_process_file", new=AsyncMock(side_effect=RuntimeError("permanent failure"))), \
-         patch.object(server, "get_workspace_rag", new=AsyncMock(return_value=rag_stub)):
+    with (
+        patch.object(
+            server, "_process_file", new=AsyncMock(side_effect=RuntimeError("permanent failure"))
+        ),
+        patch.object(server, "get_workspace_rag", new=AsyncMock(return_value=rag_stub)),
+    ):
         await server._process_job("alex", job_id, path, "")
     server.MAX_RETRIES = original
 
@@ -970,9 +1097,14 @@ async def test_status_falls_back_to_db(client):
     server._db_pool = _mock_pool
     _mock_pool.fetchrow.reset_mock()
     _mock_pool.fetchrow.return_value = {
-        "job_id": "dbonly01", "batch_id": "batch1", "file": "remote.pdf",
-        "status": "done", "attempts": 0, "error": None,
-        "description": "remote doc", "source_path": "/remote.pdf",
+        "job_id": "dbonly01",
+        "batch_id": "batch1",
+        "file": "remote.pdf",
+        "status": "done",
+        "attempts": 0,
+        "error": None,
+        "description": "remote doc",
+        "source_path": "/remote.pdf",
         "last_modified_time": "2026-01-01T00:00:00",
         "uploaded_at": "2026-01-01T00:00:00",
     }
@@ -989,12 +1121,13 @@ async def test_status_falls_back_to_db(client):
 async def test_query_references_enriched_from_db(client):
     server._db_pool = _mock_pool
     from datetime import datetime, timezone
+
     uploaded = datetime(2026, 5, 8, 12, 34, 56, tzinfo=timezone.utc)
     _mock_pool.fetch.reset_mock()
     _mock_pool.fetch.return_value = [
         {
-            "lightrag_key": "20ed9a7c_Tag_1.pdf",   # what LightRAG returns; JOIN key
-            "file_path": "/opt/data/workspace/Tag_1.pdf",   # real display path
+            "lightrag_key": "20ed9a7c_Tag_1.pdf",  # what LightRAG returns; JOIN key
+            "file_path": "/opt/data/workspace/Tag_1.pdf",  # real display path
             "file": "Tag_1.pdf",
             "job_id": "20ed9a7c",
             "description": "Q1 strategy",
@@ -1044,7 +1177,9 @@ async def test_query_references_null_when_no_db_record(client):
     assert ref["last_modified_time"] is None
     assert ref["uploaded_at"] is None
     assert ref["llm_model_extracted"] is None  # no DB row -> unknown extractor
-    assert ref["llm_model_answered"] == server.QUERY_LLM_MODEL  # answering model present regardless of DB row
+    assert (
+        ref["llm_model_answered"] == server.QUERY_LLM_MODEL
+    )  # answering model present regardless of DB row
 
 
 @pytest.mark.asyncio
@@ -1058,7 +1193,7 @@ async def test_query_answer_prose_rewrites_internal_keys(client):
         {
             "lightrag_key": "20ed9a7c_Tag_1.pdf",
             "file_path": "/opt/data/workspace/reports/Tag_1.pdf",
-            "file": "sub/Tag_1.pdf",   # original had a dir part; prose shows the basename
+            "file": "sub/Tag_1.pdf",  # original had a dir part; prose shows the basename
             "job_id": "20ed9a7c",
             "description": "Q1",
             "source_path": "sub/Tag_1.pdf",
@@ -1069,10 +1204,12 @@ async def test_query_answer_prose_rewrites_internal_keys(client):
     ]
     rag_stub.lightrag.aquery_llm.return_value = {
         "status": "success",
-        "data": {"references": [
-            {"reference_id": "1", "file_path": "20ed9a7c_Tag_1.pdf"},      # resolved
-            {"reference_id": "2", "file_path": "beefcafe_notes.txt"},      # unresolved (no row)
-        ]},
+        "data": {
+            "references": [
+                {"reference_id": "1", "file_path": "20ed9a7c_Tag_1.pdf"},  # resolved
+                {"reference_id": "2", "file_path": "beefcafe_notes.txt"},  # unresolved (no row)
+            ]
+        },
         "llm_response": {
             "content": "See sources.\n\n### References\n- [1] 20ed9a7c_Tag_1.pdf\n- [2] beefcafe_notes.txt",
             "is_streaming": False,
@@ -1082,10 +1219,10 @@ async def test_query_answer_prose_rewrites_internal_keys(client):
     resp = await client.post(f"{WS}/query", json={"query": "test"})
     assert resp.status_code == 200
     result = resp.json()["result"]
-    assert "20ed9a7c_Tag_1.pdf" not in result   # resolved internal key gone
-    assert "beefcafe_notes.txt" not in result    # unresolved key's hex prefix gone
-    assert "[1] Tag_1.pdf" in result             # resolved -> clean basename
-    assert "[2] notes.txt" in result             # unresolved -> {job_id}_ prefix stripped
+    assert "20ed9a7c_Tag_1.pdf" not in result  # resolved internal key gone
+    assert "beefcafe_notes.txt" not in result  # unresolved key's hex prefix gone
+    assert "[1] Tag_1.pdf" in result  # resolved -> clean basename
+    assert "[2] notes.txt" in result  # unresolved -> {job_id}_ prefix stripped
     _mock_pool.fetch.return_value = []
 
 
@@ -1117,6 +1254,7 @@ async def test_query_data_default_top_k_is_40(client):
 # /query/data — structured retrieval context (no LLM synthesis)
 # --------------------------------------------------------------------------- #
 
+
 @pytest.mark.asyncio
 async def test_query_data_passthrough(client):
     rag_stub.lightrag.aquery_data.return_value = {
@@ -1145,12 +1283,13 @@ async def test_query_data_passthrough(client):
 async def test_query_data_references_parsed_and_enriched(client):
     server._db_pool = _mock_pool
     from datetime import datetime, timezone
+
     uploaded = datetime(2026, 5, 8, 12, 34, 56, tzinfo=timezone.utc)
     _mock_pool.fetch.reset_mock()
     _mock_pool.fetch.return_value = [
         {
-            "lightrag_key": "20ed9a7c_Tag_1.pdf",   # what LightRAG returns; JOIN key
-            "file_path": "/opt/data/workspace/Tag_1.pdf",   # real display path
+            "lightrag_key": "20ed9a7c_Tag_1.pdf",  # what LightRAG returns; JOIN key
+            "file_path": "/opt/data/workspace/Tag_1.pdf",  # real display path
             "file": "Tag_1.pdf",
             "job_id": "20ed9a7c",
             "description": "Q1 strategy",
@@ -1164,7 +1303,9 @@ async def test_query_data_references_parsed_and_enriched(client):
         "status": "success",
         "message": "ok",
         "data": {
-            "entities": [], "relationships": [], "chunks": [],
+            "entities": [],
+            "relationships": [],
+            "chunks": [],
             "references": [{"reference_id": "1", "file_path": "20ed9a7c_Tag_1.pdf"}],
         },
         "metadata": {},
@@ -1196,10 +1337,14 @@ async def test_query_data_block_file_paths_resolved_to_real(client):
         _meta_row("bb22cafe_memo.txt", "/corpus/helix/docs/memo.txt", "memo.txt"),
     ]
     rag_stub.lightrag.aquery_data.return_value = {
-        "status": "success", "message": "ok",
+        "status": "success",
+        "message": "ok",
         "data": {
             "entities": [
-                {"entity_name": "Helix", "file_path": "aa11beef_overview.txt<SEP>bb22cafe_memo.txt"},
+                {
+                    "entity_name": "Helix",
+                    "file_path": "aa11beef_overview.txt<SEP>bb22cafe_memo.txt",
+                },
                 {"entity_name": "Orphan", "file_path": "cc33dead_ghost.txt"},  # no row -> fallback
             ],
             "relationships": [{"src_id": "A", "tgt_id": "B", "file_path": "bb22cafe_memo.txt"}],
@@ -1210,8 +1355,10 @@ async def test_query_data_block_file_paths_resolved_to_real(client):
     }
     data = (await client.post(f"{WS}/query/data", json={"query": "t"})).json()["data"]
     # multi-source entity -> both real paths, <SEP> structure preserved
-    assert data["entities"][0]["file_path"] == \
-        "/corpus/helix/docs/overview.txt<SEP>/corpus/helix/docs/memo.txt"
+    assert (
+        data["entities"][0]["file_path"]
+        == "/corpus/helix/docs/overview.txt<SEP>/corpus/helix/docs/memo.txt"
+    )
     # unresolved segment -> {job_id}_ prefix stripped (no hex token surfaces)
     assert data["entities"][1]["file_path"] == "ghost.txt"
     assert data["relationships"][0]["file_path"] == "/corpus/helix/docs/memo.txt"
@@ -1231,12 +1378,16 @@ async def test_query_data_include_references_false(client):
         "status": "success",
         "message": "ok",
         "data": {
-            "entities": [], "relationships": [], "chunks": [],
+            "entities": [],
+            "relationships": [],
+            "chunks": [],
             "references": [{"reference_id": "1", "file_path": "20ed9a7c_Tag_1.pdf"}],
         },
         "metadata": {},
     }
-    resp = await client.post(f"{WS}/query/data", json={"query": "test", "include_references": False})
+    resp = await client.post(
+        f"{WS}/query/data", json={"query": "test", "include_references": False}
+    )
     assert resp.status_code == 200
     assert resp.json()["data"]["references"] == []
     _mock_pool.fetch.assert_not_called()
@@ -1257,6 +1408,7 @@ async def test_query_unknown_workspace_404(client):
     # Hard cutover: no global "not initialised" state. An unknown/soft-deleted workspace 404s.
     async def _no_such(workspace_id):
         return None
+
     server._lookup_workspace = _no_such
     resp = await client.post("/workspace/ghost/query/data", json={"query": "test"})
     assert resp.status_code == 404
@@ -1275,6 +1427,7 @@ async def test_query_data_exception_returns_500(client):
 # --------------------------------------------------------------------------- #
 # file_path_contains — folder/file scope post-filter
 # --------------------------------------------------------------------------- #
+
 
 def test_path_matches_any_empty_needles_keeps_all():
     # Empty / None needle list = no filter, everything passes (even empty values).
@@ -1317,12 +1470,28 @@ async def test_query_data_file_path_filter_or(client):
     server._db_pool = _mock_pool
     _mock_pool.fetch.reset_mock()
     _mock_pool.fetch.return_value = [
-        {"lightrag_key": "/opt/data/workspace/career/cv.pdf", "file_path": "/opt/data/workspace/career/cv.pdf",
-         "file": "cv.pdf", "job_id": None, "description": None, "source_path": None,
-         "last_modified_time": None, "uploaded_at": None, "llm_model_extracted": None},
-        {"lightrag_key": "/opt/data/workspace/finance/tax.pdf", "file_path": "/opt/data/workspace/finance/tax.pdf",
-         "file": "tax.pdf", "job_id": None, "description": None, "source_path": None,
-         "last_modified_time": None, "uploaded_at": None, "llm_model_extracted": None},
+        {
+            "lightrag_key": "/opt/data/workspace/career/cv.pdf",
+            "file_path": "/opt/data/workspace/career/cv.pdf",
+            "file": "cv.pdf",
+            "job_id": None,
+            "description": None,
+            "source_path": None,
+            "last_modified_time": None,
+            "uploaded_at": None,
+            "llm_model_extracted": None,
+        },
+        {
+            "lightrag_key": "/opt/data/workspace/finance/tax.pdf",
+            "file_path": "/opt/data/workspace/finance/tax.pdf",
+            "file": "tax.pdf",
+            "job_id": None,
+            "description": None,
+            "source_path": None,
+            "last_modified_time": None,
+            "uploaded_at": None,
+            "llm_model_extracted": None,
+        },
     ]
     rag_stub.lightrag.aquery_data.return_value = {
         "status": "success",
@@ -1347,10 +1516,13 @@ async def test_query_data_file_path_filter_or(client):
         },
         "metadata": {},
     }
-    resp = await client.post(f"{WS}/query/data", json={
-        "query": "test",
-        "file_path_contains": ["/career/", "/projects/"],
-    })
+    resp = await client.post(
+        f"{WS}/query/data",
+        json={
+            "query": "test",
+            "file_path_contains": ["/career/", "/projects/"],
+        },
+    )
     assert resp.status_code == 200
     data = resp.json()["data"]
     assert [e["entity_name"] for e in data["entities"]] == ["A"]
@@ -1362,9 +1534,14 @@ async def test_query_data_file_path_filter_or(client):
 
 @pytest.mark.asyncio
 async def test_query_data_file_path_filter_boosts_top_k(client):
-    await client.post(f"{WS}/query/data", json={
-        "query": "test", "top_k": 12, "file_path_contains": ["/career/"],
-    })
+    await client.post(
+        f"{WS}/query/data",
+        json={
+            "query": "test",
+            "top_k": 12,
+            "file_path_contains": ["/career/"],
+        },
+    )
     kwargs = lightrag_mod.QueryParam.call_args.kwargs
     boost = server.RAG_FILTER_TOPK_BOOST
     assert kwargs.get("top_k") == 12 * boost
@@ -1378,7 +1555,9 @@ async def test_query_data_no_filter_does_not_boost_or_drop(client):
         "message": "ok",
         "data": {
             "entities": [{"entity_name": "A", "file_path": "/opt/data/workspace/finance/tax.pdf"}],
-            "relationships": [], "chunks": [], "references": [],
+            "relationships": [],
+            "chunks": [],
+            "references": [],
         },
         "metadata": {},
     }
@@ -1387,8 +1566,8 @@ async def test_query_data_no_filter_does_not_boost_or_drop(client):
     # Nothing dropped even though no path matches a (non-existent) filter.
     assert len(resp.json()["data"]["entities"]) == 1
     kwargs = lightrag_mod.QueryParam.call_args.kwargs
-    assert kwargs.get("top_k") == 12          # no boost
-    assert "chunk_top_k" not in kwargs        # omitted when no filter
+    assert kwargs.get("top_k") == 12  # no boost
+    assert "chunk_top_k" not in kwargs  # omitted when no filter
 
 
 @pytest.mark.asyncio
@@ -1436,15 +1615,22 @@ async def test_graph_html_node_file_paths_resolved_no_key_leak(client):
             SimpleNamespace(
                 id="helix_node",
                 properties={"file_path": "aa11beef_overview.txt", "entity_id": "helix_node"},
-                labels=["E"]),
+                labels=["E"],
+            ),
             SimpleNamespace(
                 id="memo_node",
                 properties={"file_path": "bb22cafe_memo.txt", "entity_id": "memo_node"},
-                labels=["E"]),
+                labels=["E"],
+            ),
         ],
         # edge tooltip carries a multi-source <SEP>-joined internal-key file_path too
-        edges=[SimpleNamespace(source="helix_node", target="memo_node",
-                               properties={"file_path": "aa11beef_overview.txt<SEP>bb22cafe_memo.txt"})],
+        edges=[
+            SimpleNamespace(
+                source="helix_node",
+                target="memo_node",
+                properties={"file_path": "aa11beef_overview.txt<SEP>bb22cafe_memo.txt"},
+            )
+        ],
     )
     gkg = AsyncMock(return_value=kg)
     orig = rag_stub.lightrag.get_knowledge_graph
@@ -1454,7 +1640,7 @@ async def test_graph_html_node_file_paths_resolved_no_key_leak(client):
     finally:
         rag_stub.lightrag.get_knowledge_graph = orig
     assert resp.status_code == 200
-    assert "helix_node" in resp.text                      # rendered
+    assert "helix_node" in resp.text  # rendered
     assert "/corpus/helix/docs/overview.txt" in resp.text  # real path in a tooltip
     # internal {job_id}_ keys never rendered anywhere (nodes OR edges)
     assert "aa11beef_" not in resp.text and "bb22cafe_" not in resp.text
@@ -1482,6 +1668,7 @@ async def test_graph_html_no_filter_no_boost(client):
 # _split_if_csv — per-file metadata from comma-separated form fields
 # --------------------------------------------------------------------------- #
 
+
 @pytest.mark.asyncio
 async def test_batch_json_metadata_per_file(tmp_path, client):
     server._db_pool = _mock_pool
@@ -1491,38 +1678,58 @@ async def test_batch_json_metadata_per_file(tmp_path, client):
     file1.write_text("aaa")
     file2.write_text("bbb")
     import json as _json
-    meta = _json.dumps([
-        {"description": "Desc A", "source_path": "/src/A.txt", "last_modified_time": "2026-01-01T00:00:00"},
-        {"description": "Desc B", "source_path": "/src/B.txt", "last_modified_time": "2026-02-01T00:00:00"},
-    ])
-    with patch.object(server, "WORKING_DIR", str(tmp_path)), \
-         patch.object(server, "_process_file", new=AsyncMock()):
+
+    meta = _json.dumps(
+        [
+            {
+                "description": "Desc A",
+                "source_path": "/src/A.txt",
+                "last_modified_time": "2026-01-01T00:00:00",
+            },
+            {
+                "description": "Desc B",
+                "source_path": "/src/B.txt",
+                "last_modified_time": "2026-02-01T00:00:00",
+            },
+        ]
+    )
+    with (
+        patch.object(server, "WORKING_DIR", str(tmp_path)),
+        patch.object(server, "_process_file", new=AsyncMock()),
+    ):
         resp = await client.post(
             f"{WS}/upload/batch",
-            files=[("files", ("A.txt", file1.read_bytes(), "text/plain")),
-                   ("files", ("B.txt", file2.read_bytes(), "text/plain"))],
+            files=[
+                ("files", ("A.txt", file1.read_bytes(), "text/plain")),
+                ("files", ("B.txt", file2.read_bytes(), "text/plain")),
+            ],
             data={"metadata": meta},
         )
     assert resp.status_code == 200
     # INSERT args: (sql, job_id, batch_id, workspace, file, description, source_path,
     #               last_modified_time, content_hash, file_path, lightrag_key, llm_model_extracted)
-    insert_calls = [c for c in _mock_pool.execute.call_args_list if "INSERT INTO rag_file_metadata" in str(c)]
+    insert_calls = [
+        c for c in _mock_pool.execute.call_args_list if "INSERT INTO rag_file_metadata" in str(c)
+    ]
     assert len(insert_calls) == 2
     args0 = insert_calls[0].args
     args1 = insert_calls[1].args
-    assert args0[3] == "alex" and args1[3] == "alex"   # workspace
+    assert args0[3] == "alex" and args1[3] == "alex"  # workspace
     descs = {args0[5], args1[5]}
     assert descs == {"Desc A", "Desc B"}
     srcs = {args0[6], args1[6]}
     assert srcs == {"/src/A.txt", "/src/B.txt"}
     # lightrag_key (arg 10) is the {job_id}_{basename} identity; llm_model_extracted moved to arg 11.
     assert args0[10] == f"{args0[1]}_{args0[4]}" and args1[10] == f"{args1[1]}_{args1[4]}"
-    assert args0[11] == server.LLM_MODEL and args1[11] == server.LLM_MODEL  # extractor captured at ingest
+    assert (
+        args0[11] == server.LLM_MODEL and args1[11] == server.LLM_MODEL
+    )  # extractor captured at ingest
 
 
 # --------------------------------------------------------------------------- #
 # Workspace registry — migration & seed (Step 1)
 # --------------------------------------------------------------------------- #
+
 
 def _fresh_pool(primary_row=None):
     pool = MagicMock()
@@ -1551,7 +1758,9 @@ async def test_db_init_adds_workspace_column_backfills_and_enforces_not_null(mon
     assert "ADD COLUMN IF NOT EXISTS workspace" in joined
     assert "SET NOT NULL" in joined
     # backfill uses the physical workspace value, not a hardcoded literal
-    update_calls = [c for c in stmts if "UPDATE rag_file_metadata" in str(c) and "workspace" in str(c)]
+    update_calls = [
+        c for c in stmts if "UPDATE rag_file_metadata" in str(c) and "workspace" in str(c)
+    ]
     assert update_calls, "expected a backfill UPDATE for existing rows"
     assert "default" in update_calls[0].args
 
@@ -1561,7 +1770,11 @@ async def test_db_init_workspace_column_has_no_default():
     # The added column must NOT carry a DEFAULT — future inserts must set workspace explicitly.
     pool = _fresh_pool()
     await server._db_init(pool)
-    add_col = [str(c) for c in pool.execute.call_args_list if "ADD COLUMN IF NOT EXISTS workspace" in str(c)]
+    add_col = [
+        str(c)
+        for c in pool.execute.call_args_list
+        if "ADD COLUMN IF NOT EXISTS workspace" in str(c)
+    ]
     assert add_col and "DEFAULT" not in add_col[0]
 
 
@@ -1574,9 +1787,9 @@ async def test_db_init_seeds_primary_default_when_absent(monkeypatch):
     # The primary workspace seed runs when no primary row exists yet.
     assert len(inserts) >= 1
     args = inserts[0].args
-    assert server.PRIMARY_WORKSPACE_ID in args          # "default"
+    assert server.PRIMARY_WORKSPACE_ID in args  # "default"
     assert server.PRIMARY_WORKSPACE_DESCRIPTION in args
-    assert "default" in args                            # physical lightrag_workspace == POSTGRES_WORKSPACE
+    assert "default" in args  # physical lightrag_workspace == POSTGRES_WORKSPACE
 
 
 @pytest.mark.asyncio
@@ -1595,6 +1808,7 @@ def test_primary_workspace_constants():
 # --------------------------------------------------------------------------- #
 # Instance registry — get_workspace_rag (Step 2)
 # --------------------------------------------------------------------------- #
+
 
 def _ws_pool(row):
     pool = MagicMock()
@@ -1625,6 +1839,7 @@ async def test_get_workspace_rag_builds_and_caches(monkeypatch):
 async def test_get_workspace_rag_unknown_404(monkeypatch):
     server._db_pool = _ws_pool(None)
     from fastapi import HTTPException
+
     with pytest.raises(HTTPException) as ei:
         await server.get_workspace_rag("ghost")
     assert ei.value.status_code == 404
@@ -1635,6 +1850,7 @@ async def test_get_workspace_rag_soft_deleted_404(monkeypatch):
     # _lookup_workspace filters deleted_at IS NULL, so a soft-deleted workspace returns None → 404
     server._db_pool = _ws_pool(None)
     from fastapi import HTTPException
+
     with pytest.raises(HTTPException) as ei:
         await server.get_workspace_rag("career")
     assert ei.value.status_code == 404
@@ -1671,6 +1887,7 @@ async def test_lookup_workspace_filters_deleted():
 # Workspace registry API (Step 3)
 # --------------------------------------------------------------------------- #
 
+
 def _registry_pool(existing=None, rows=None):
     pool = MagicMock()
     pool.execute = AsyncMock()
@@ -1684,7 +1901,9 @@ def test_valid_slugs(slug):
     assert server._is_valid_slug(slug) is True
 
 
-@pytest.mark.parametrize("slug", ["Business", "1abc", "a b", "", "x" * 49, "a-b", "ab!", "_ab", "café"])
+@pytest.mark.parametrize(
+    "slug", ["Business", "1abc", "a b", "", "x" * 49, "a-b", "ab!", "_ab", "café"]
+)
 def test_invalid_slugs(slug):
     assert server._is_valid_slug(slug) is False
 
@@ -1701,8 +1920,8 @@ async def test_create_workspace_sets_lightrag_workspace_to_id(client):
     inserts = [c for c in pool.execute.call_args_list if "INSERT INTO rag_workspaces" in str(c)]
     assert len(inserts) == 1
     args = inserts[0].args
-    assert args.count("career") >= 2   # id AND lightrag_workspace both 'career'
-    assert "HACK" not in args          # client-supplied lightrag_workspace ignored
+    assert args.count("career") >= 2  # id AND lightrag_workspace both 'career'
+    assert "HACK" not in args  # client-supplied lightrag_workspace ignored
 
 
 @pytest.mark.asyncio
@@ -1723,10 +1942,17 @@ async def test_create_workspace_duplicate_409(client):
 @pytest.mark.asyncio
 async def test_list_workspaces_active(client):
     from datetime import datetime, timezone
-    pool = _registry_pool(rows=[
-        {"id": "alex", "name": "alex", "description": "Alex's personal workspace.",
-         "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc)},
-    ])
+
+    pool = _registry_pool(
+        rows=[
+            {
+                "id": "alex",
+                "name": "alex",
+                "description": "Alex's personal workspace.",
+                "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+            },
+        ]
+    )
     server._db_pool = pool
     resp = await client.get("/all-workspaces/list")
     assert resp.status_code == 200
@@ -1771,7 +1997,9 @@ async def test_delete_unknown_404(client):
 
 @pytest.mark.asyncio
 async def test_restore_clears_deleted_at(client):
-    pool = _registry_pool(existing={"id": "career", "is_primary": False, "deleted_at": "2026-01-01T00:00:00"})
+    pool = _registry_pool(
+        existing={"id": "career", "is_primary": False, "deleted_at": "2026-01-01T00:00:00"}
+    )
     server._db_pool = pool
     resp = await client.post("/workspace/career/restore")
     assert resp.status_code == 200
@@ -1791,15 +2019,22 @@ async def test_restore_not_deleted_404(client):
 # Hard purge (Step 5)
 # --------------------------------------------------------------------------- #
 
+
 def _purge_pool(graph_exists=False, lightrag_tables=None):
     pool = MagicMock()
     pool.execute = AsyncMock()
     pool.fetch = AsyncMock(return_value=[{"table_name": t} for t in (lightrag_tables or [])])
     pool.fetchval = AsyncMock(return_value=1 if graph_exists else None)
-    pool.fetchrow = AsyncMock(return_value={
-        "id": "career", "name": "Career", "description": None,
-        "is_primary": False, "deleted_at": None, "lightrag_workspace": "career",
-    })
+    pool.fetchrow = AsyncMock(
+        return_value={
+            "id": "career",
+            "name": "Career",
+            "description": None,
+            "is_primary": False,
+            "deleted_at": None,
+            "lightrag_workspace": "career",
+        }
+    )
     conn = MagicMock()
     conn.execute = AsyncMock()
     cm = MagicMock()
@@ -1824,7 +2059,7 @@ async def test_purge_deletes_rows_files_and_registry(client, tmp_path):
     assert any("DELETE FROM" in s and "lightrag_doc_status" in s for s in executed)
     assert any("DELETE FROM rag_file_metadata" in s for s in executed)
     assert any("DELETE FROM rag_workspaces" in s for s in executed)
-    assert not (tmp_path / "career").exists()   # files dir removed
+    assert not (tmp_path / "career").exists()  # files dir removed
 
 
 @pytest.mark.asyncio
@@ -1846,16 +2081,22 @@ async def test_purge_skips_graph_drop_when_absent(client, tmp_path):
         resp = await client.delete("/workspace/career?purge=true")
     assert resp.status_code == 200
     drops = [str(c) for c in pool._conn.execute.call_args_list if "drop_graph" in str(c)]
-    assert not drops   # no graph → no drop attempted
+    assert not drops  # no graph → no drop attempted
 
 
 @pytest.mark.asyncio
 async def test_purge_primary_409(client):
     pool = _purge_pool()
-    pool.fetchrow = AsyncMock(return_value={
-        "id": "alex", "name": "alex", "description": None,
-        "is_primary": True, "deleted_at": None, "lightrag_workspace": "default",
-    })
+    pool.fetchrow = AsyncMock(
+        return_value={
+            "id": "alex",
+            "name": "alex",
+            "description": None,
+            "is_primary": True,
+            "deleted_at": None,
+            "lightrag_workspace": "default",
+        }
+    )
     server._db_pool = pool
     resp = await client.delete("/workspace/alex?purge=true")
     assert resp.status_code == 409
@@ -1868,11 +2109,19 @@ async def test_purge_primary_409(client):
 # Workspace-scoped routing & isolation (Step 4)
 # --------------------------------------------------------------------------- #
 
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("method,path", [
-    ("post", "/query"), ("post", "/query/data"), ("post", "/upload/batch"),
-    ("get", "/jobs"), ("get", "/batch/x"), ("get", "/status/x"),
-])
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("post", "/query"),
+        ("post", "/query/data"),
+        ("post", "/upload/batch"),
+        ("get", "/jobs"),
+        ("get", "/batch/x"),
+        ("get", "/status/x"),
+    ],
+)
 async def test_old_unprefixed_routes_gone(client, method, path):
     kwargs = {"json": {"query": "t"}} if method == "post" else {}
     resp = await getattr(client, method)(path, **kwargs)
@@ -1887,8 +2136,10 @@ async def test_require_workspace_invalid_slug_404(client):
 
 @pytest.mark.asyncio
 async def test_upload_routes_to_named_workspace(tmp_path, client):
-    with patch.object(server, "WORKING_DIR", str(tmp_path)), \
-         patch.object(server, "_process_file", new=AsyncMock()):
+    with (
+        patch.object(server, "WORKING_DIR", str(tmp_path)),
+        patch.object(server, "_process_file", new=AsyncMock()),
+    ):
         resp = await client.post("/workspace/career/upload/batch", files=[_fake_upload("c.txt")])
     job_id = resp.json()["jobs"][0]["job_id"]
     assert server._jobs[job_id]["workspace"] == "career"
@@ -1900,8 +2151,10 @@ async def test_upload_routes_to_named_workspace(tmp_path, client):
 
 @pytest.mark.asyncio
 async def test_status_scoped_to_workspace(tmp_path, client):
-    with patch.object(server, "WORKING_DIR", str(tmp_path)), \
-         patch.object(server, "_process_file", new=AsyncMock()):
+    with (
+        patch.object(server, "WORKING_DIR", str(tmp_path)),
+        patch.object(server, "_process_file", new=AsyncMock()),
+    ):
         resp = await client.post(f"{WS}/upload/batch", files=[_fake_upload("a.txt")])
     job_id = resp.json()["jobs"][0]["job_id"]
     # visible under its own workspace…
@@ -1912,8 +2165,10 @@ async def test_status_scoped_to_workspace(tmp_path, client):
 
 @pytest.mark.asyncio
 async def test_batch_scoped_to_workspace(tmp_path, client):
-    with patch.object(server, "WORKING_DIR", str(tmp_path)), \
-         patch.object(server, "_process_file", new=AsyncMock()):
+    with (
+        patch.object(server, "WORKING_DIR", str(tmp_path)),
+        patch.object(server, "_process_file", new=AsyncMock()),
+    ):
         resp = await client.post(f"{WS}/upload/batch", files=[_fake_upload("a.txt")])
     batch_id = resp.json()["batch_id"]
     assert (await client.get(f"{WS}/batch/{batch_id}")).status_code == 200
@@ -1926,7 +2181,13 @@ async def test_two_workspaces_get_distinct_instances(monkeypatch):
     server._db_pool = _ws_pool(None)
 
     async def _fake_lookup(wid):
-        return {"id": wid, "name": wid, "description": None, "lightrag_workspace": wid, "is_primary": False}
+        return {
+            "id": wid,
+            "name": wid,
+            "description": None,
+            "lightrag_workspace": wid,
+            "is_primary": False,
+        }
 
     async def _fake_build(wid, physical):
         return MagicMock(name=f"rag-{wid}")
@@ -1942,6 +2203,7 @@ async def test_two_workspaces_get_distinct_instances(monkeypatch):
 # --------------------------------------------------------------------------- #
 # Part 0 — ingestion-integrity guard (_verify_ingestion)
 # --------------------------------------------------------------------------- #
+
 
 def _docs(status="processed", content_length=11):
     return _AnyKeyDocs({"status": status, "content_length": content_length, "metadata": {}})
@@ -2035,8 +2297,15 @@ async def test_partial_ingest_retries_then_fails_via_process_job(tmp_path):
     path = tmp_path / "p0.txt"
     path.write_text("content")
     job_id = "p0fail"
-    server._jobs[job_id] = {"job_id": job_id, "file": "p0.txt", "workspace": "alex",
-                            "status": "pending", "attempts": 0, "error": None, "batch_id": "b"}
+    server._jobs[job_id] = {
+        "job_id": job_id,
+        "file": "p0.txt",
+        "workspace": "alex",
+        "status": "pending",
+        "attempts": 0,
+        "error": None,
+        "batch_id": "b",
+    }
     rag_stub.lightrag.aget_docs_by_ids.return_value = _docs(status="failed")
     original = server.MAX_RETRIES
     server.MAX_RETRIES = 1
@@ -2053,13 +2322,17 @@ async def test_partial_ingest_retries_then_fails_via_process_job(tmp_path):
 # Part A0 — endpoint URL consistency rename
 # --------------------------------------------------------------------------- #
 
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("method,path", [
-    ("get", "/workspaces/list"),
-    ("post", "/workspaces"),
-    ("delete", "/workspaces/career"),
-    ("post", "/workspaces/career/restore"),
-])
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("get", "/workspaces/list"),
+        ("post", "/workspaces"),
+        ("delete", "/workspaces/career"),
+        ("post", "/workspaces/career/restore"),
+    ],
+)
 async def test_old_workspace_registry_routes_gone(client, method, path):
     kwargs = {"json": {"id": "career", "name": "x"}} if method == "post" else {}
     resp = await getattr(client, method)(path, **kwargs)
@@ -2079,6 +2352,7 @@ async def test_new_registry_routes_present(client):
 # Part A1/A3/A4 — caller-supplied absolute file_path, content_hash, doc_id index
 # --------------------------------------------------------------------------- #
 
+
 def test_join_path():
     assert server._join_path("/data/corpus", "sub/dir/f.pdf") == "/data/corpus/sub/dir/f.pdf"
     assert server._join_path("/data/corpus/", "/sub/f.pdf") == "/data/corpus/sub/f.pdf"
@@ -2090,7 +2364,9 @@ async def test_process_file_uses_given_file_path(tmp_path):
     path.write_text("hello world")
     rag_stub.lightrag.aget_docs_by_ids.return_value = _docs(status="processed")
     await server._process_file(path, rag_stub, file_path="/opt/data/workspace/sub/x.txt")
-    assert rag_stub.lightrag.ainsert.call_args.kwargs["file_paths"] == ["/opt/data/workspace/sub/x.txt"]
+    assert rag_stub.lightrag.ainsert.call_args.kwargs["file_paths"] == [
+        "/opt/data/workspace/sub/x.txt"
+    ]
     # The doc id is pinned at insert (ids=) so post-insert verification can find the record.
     assert "ids" in rag_stub.lightrag.ainsert.call_args.kwargs
 
@@ -2098,10 +2374,17 @@ async def test_process_file_uses_given_file_path(tmp_path):
 @pytest.mark.asyncio
 async def test_upload_threads_external_path_and_hash(tmp_path, client):
     import json as _json
+
     meta = _json.dumps([{"source_path": "sub/report.pdf", "path_root": "/data/corpus"}])
-    with patch.object(server, "WORKING_DIR", str(tmp_path)), \
-         patch.object(server, "_process_file", new=AsyncMock(return_value="doc-x")):
-        resp = await client.post(f"{WS}/upload/batch", files=[_fake_upload("report.pdf", b"hello")], data={"metadata": meta})
+    with (
+        patch.object(server, "WORKING_DIR", str(tmp_path)),
+        patch.object(server, "_process_file", new=AsyncMock(return_value="doc-x")),
+    ):
+        resp = await client.post(
+            f"{WS}/upload/batch",
+            files=[_fake_upload("report.pdf", b"hello")],
+            data={"metadata": meta},
+        )
     job_id = resp.json()["jobs"][0]["job_id"]
     # The queue carries the LightRAG identity (lightrag_input = {job_id}_basename), NOT the
     # display path; the real caller path is recorded as the display file_path.
@@ -2110,6 +2393,7 @@ async def test_upload_threads_external_path_and_hash(tmp_path, client):
     assert server._jobs[job_id]["file_path"] == "/data/corpus/sub/report.pdf"
     # content_hash = sha256("hello")
     import hashlib
+
     assert server._jobs[job_id]["content_hash"] == hashlib.sha256(b"hello").hexdigest()
 
 
@@ -2120,9 +2404,19 @@ async def test_doc_id_persisted_on_done(tmp_path):
     path = tmp_path / "aaa_f.txt"
     path.write_text("content")
     job_id = "docidjob"
-    server._jobs[job_id] = {"job_id": job_id, "file": "f.txt", "workspace": "alex", "status": "pending", "attempts": 0, "error": None, "batch_id": "b"}
-    with patch.object(server, "_process_file", new=AsyncMock(return_value="doc-abc")), \
-         patch.object(server, "get_workspace_rag", new=AsyncMock(return_value=rag_stub)):
+    server._jobs[job_id] = {
+        "job_id": job_id,
+        "file": "f.txt",
+        "workspace": "alex",
+        "status": "pending",
+        "attempts": 0,
+        "error": None,
+        "batch_id": "b",
+    }
+    with (
+        patch.object(server, "_process_file", new=AsyncMock(return_value="doc-abc")),
+        patch.object(server, "get_workspace_rag", new=AsyncMock(return_value=rag_stub)),
+    ):
         await server._process_job("alex", job_id, path, "", None)
     calls = [str(c) for c in _mock_pool.execute.call_args_list]
     assert any("SET doc_id" in c for c in calls)
@@ -2132,13 +2426,23 @@ async def test_doc_id_persisted_on_done(tmp_path):
 @pytest.mark.asyncio
 async def test_files_index_endpoint(client):
     from datetime import datetime, timezone
+
     pool = MagicMock()
-    pool.fetch = AsyncMock(return_value=[{
-        "job_id": "j1", "file": "report.pdf", "file_path": "/opt/data/workspace/report.pdf",
-        "source_path": "report.pdf", "doc_id": "doc-1", "content_hash": "abc123",
-        "status": "done", "last_modified_time": "2026-01-01T00:00:00",
-        "uploaded_at": datetime(2026, 5, 8, 12, 0, 0, tzinfo=timezone.utc),
-    }])
+    pool.fetch = AsyncMock(
+        return_value=[
+            {
+                "job_id": "j1",
+                "file": "report.pdf",
+                "file_path": "/opt/data/workspace/report.pdf",
+                "source_path": "report.pdf",
+                "doc_id": "doc-1",
+                "content_hash": "abc123",
+                "status": "done",
+                "last_modified_time": "2026-01-01T00:00:00",
+                "uploaded_at": datetime(2026, 5, 8, 12, 0, 0, tzinfo=timezone.utc),
+            }
+        ]
+    )
     server._db_pool = pool
     resp = await client.get(f"{WS}/files")
     assert resp.status_code == 200
@@ -2151,6 +2455,7 @@ async def test_files_index_endpoint(client):
 # --------------------------------------------------------------------------- #
 # Part A5 — per-file delete (with cache invalidation)
 # --------------------------------------------------------------------------- #
+
 
 @pytest.mark.asyncio
 async def test_delete_file_by_doc_id_clears_cache(client):
@@ -2194,18 +2499,38 @@ async def test_delete_file_by_rel_path_resolves(client):
 # Part A7 — workspace status endpoint
 # --------------------------------------------------------------------------- #
 
+
 @pytest.mark.asyncio
 async def test_workspace_status(client):
     pool = MagicMock()
-    pool.fetchrow = AsyncMock(side_effect=[
-        {"id": "default", "name": "Default", "description": None, "lightrag_workspace": "default",
-         "is_primary": True, "deleted_at": None},          # _db_get_workspace_any
-    ])
-    pool.fetch = AsyncMock(side_effect=[
-        [{"status": "processed", "n": 3}, {"status": "failed", "n": 1}],  # doc statuses
-        [{"status": "done", "n": 3}],                                     # job statuses
-    ])
-    pool.fetchval = AsyncMock(side_effect=[12, "lightrag_vdb_entity_x", 40, "lightrag_vdb_relation_x", 55, "2026-05-08T12:00:00"])
+    pool.fetchrow = AsyncMock(
+        side_effect=[
+            {
+                "id": "default",
+                "name": "Default",
+                "description": None,
+                "lightrag_workspace": "default",
+                "is_primary": True,
+                "deleted_at": None,
+            },  # _db_get_workspace_any
+        ]
+    )
+    pool.fetch = AsyncMock(
+        side_effect=[
+            [{"status": "processed", "n": 3}, {"status": "failed", "n": 1}],  # doc statuses
+            [{"status": "done", "n": 3}],  # job statuses
+        ]
+    )
+    pool.fetchval = AsyncMock(
+        side_effect=[
+            12,
+            "lightrag_vdb_entity_x",
+            40,
+            "lightrag_vdb_relation_x",
+            55,
+            "2026-05-08T12:00:00",
+        ]
+    )
     server._db_pool = pool
     resp = await client.get("/workspace/default")
     assert resp.status_code == 200
@@ -2213,17 +2538,25 @@ async def test_workspace_status(client):
     assert data["active"] is True
     assert data["documents"]["by_status"] == {"processed": 3, "failed": 1}
     assert data["documents"]["total"] == 4
-    assert "lightrag_workspace" not in data   # internal storage namespace never leaks to the API
+    assert "lightrag_workspace" not in data  # internal storage namespace never leaks to the API
 
 
 @pytest.mark.asyncio
 async def test_workspace_status_soft_deleted_shows_inactive(client):
     pool = MagicMock()
-    pool.fetchrow = AsyncMock(side_effect=[
-        {"id": "career", "name": "Career", "description": None, "lightrag_workspace": "career",
-         "is_primary": False, "deleted_at": "2026-01-01T00:00:00"},
-        None,
-    ])
+    pool.fetchrow = AsyncMock(
+        side_effect=[
+            {
+                "id": "career",
+                "name": "Career",
+                "description": None,
+                "lightrag_workspace": "career",
+                "is_primary": False,
+                "deleted_at": "2026-01-01T00:00:00",
+            },
+            None,
+        ]
+    )
     pool.fetch = AsyncMock(side_effect=[[], []])
     pool.fetchval = AsyncMock(side_effect=[0, None, None, None, None])
     server._db_pool = pool
@@ -2235,6 +2568,7 @@ async def test_workspace_status_soft_deleted_shows_inactive(client):
 # --------------------------------------------------------------------------- #
 # LLM provider routing: _llm_call_kwargs (OpenAI vs OpenRouter/DeepSeek)
 # --------------------------------------------------------------------------- #
+
 
 @pytest.fixture
 def _restore_llm_flag():
@@ -2279,6 +2613,7 @@ def test_llm_call_kwargs_drops_unknown_kwargs(_restore_llm_flag):
 # Phase-split LLM routing: extraction (ingest) vs query-time provider
 # --------------------------------------------------------------------------- #
 
+
 def test_llm_phase_defaults_to_query():
     # Outside an ingest, the active phase is the hot query path.
     assert server._llm_phase.get() == "query"
@@ -2291,9 +2626,15 @@ def _reimport_server_with_env(monkeypatch, env: dict):
     side-effect-free (only os.getenv + FastAPI app/route definitions), and the RAGAnything
     stub in sys.modules is reused, so this is safe to run repeatedly."""
     import importlib.util
+
     for k in (
-        "LLM_MODEL", "LLM_BASE_URL", "LLM_API_KEY", "OPENAI_API_KEY",
-        "QUERY_LLM_MODEL", "QUERY_LLM_BASE_URL", "QUERY_LLM_API_KEY",
+        "LLM_MODEL",
+        "LLM_BASE_URL",
+        "LLM_API_KEY",
+        "OPENAI_API_KEY",
+        "QUERY_LLM_MODEL",
+        "QUERY_LLM_BASE_URL",
+        "QUERY_LLM_API_KEY",
     ):
         monkeypatch.delenv(k, raising=False)
     for k, v in env.items():
@@ -2309,12 +2650,15 @@ def test_query_llm_config_defaults_to_extraction_config(monkeypatch):
     # preserving the historical single-model behaviour. Config is resolved from env at
     # import, so re-derive it in an isolated module instance from a CLEARED env (QUERY_LLM_*
     # unset) to assert the fallback regardless of the ambient/production env (which sets the split).
-    mod = _reimport_server_with_env(monkeypatch, {
-        "OPENAI_API_KEY": "oai-key",
-        "LLM_MODEL": "extract-only-model",
-        "LLM_BASE_URL": "https://openrouter.ai/api/v1",
-        "LLM_API_KEY": "or-key",
-    })
+    mod = _reimport_server_with_env(
+        monkeypatch,
+        {
+            "OPENAI_API_KEY": "oai-key",
+            "LLM_MODEL": "extract-only-model",
+            "LLM_BASE_URL": "https://openrouter.ai/api/v1",
+            "LLM_API_KEY": "or-key",
+        },
+    )
     assert mod.QUERY_LLM_MODEL == mod.LLM_MODEL == "extract-only-model"
     assert mod.QUERY_LLM_BASE_URL == mod.LLM_BASE_URL == "https://openrouter.ai/api/v1"
     assert mod.QUERY_LLM_API_KEY == mod.LLM_API_KEY == "or-key"
@@ -2325,15 +2669,18 @@ def test_query_llm_config_blank_base_url_reuses_extraction(monkeypatch):
     # docker-compose passes unset vars through as empty strings, so an empty (not just absent)
     # QUERY_LLM_BASE_URL must still reuse the extraction endpoint — otherwise the DeepSeek model id
     # would be sent to OpenAI ("invalid model ID"). This is the exact production/compose shape.
-    mod = _reimport_server_with_env(monkeypatch, {
-        "OPENAI_API_KEY": "oai-key",
-        "LLM_MODEL": "deepseek/deepseek-chat",
-        "LLM_BASE_URL": "https://openrouter.ai/api/v1",
-        "LLM_API_KEY": "or-key",
-        "QUERY_LLM_MODEL": "",       # blank -> reuse LLM_MODEL
-        "QUERY_LLM_BASE_URL": "",    # blank -> reuse LLM_BASE_URL (NOT OpenAI)
-        "QUERY_LLM_API_KEY": "",
-    })
+    mod = _reimport_server_with_env(
+        monkeypatch,
+        {
+            "OPENAI_API_KEY": "oai-key",
+            "LLM_MODEL": "deepseek/deepseek-chat",
+            "LLM_BASE_URL": "https://openrouter.ai/api/v1",
+            "LLM_API_KEY": "or-key",
+            "QUERY_LLM_MODEL": "",  # blank -> reuse LLM_MODEL
+            "QUERY_LLM_BASE_URL": "",  # blank -> reuse LLM_BASE_URL (NOT OpenAI)
+            "QUERY_LLM_API_KEY": "",
+        },
+    )
     assert mod.QUERY_LLM_MODEL == "deepseek/deepseek-chat"
     assert mod.QUERY_LLM_BASE_URL == "https://openrouter.ai/api/v1"
     assert mod.QUERY_LLM_API_KEY == "or-key"
@@ -2344,18 +2691,23 @@ def test_query_llm_config_overrides_extraction_config(monkeypatch):
     # With QUERY_LLM_* set (the split production shape), the query config is independent of the
     # extraction config. To send query-time work to a different provider than extraction, set
     # QUERY_LLM_BASE_URL explicitly (here: force OpenAI while extraction runs on OpenRouter).
-    mod = _reimport_server_with_env(monkeypatch, {
-        "OPENAI_API_KEY": "oai-key",
-        "LLM_MODEL": "deepseek/deepseek-v4-flash",
-        "LLM_BASE_URL": "https://openrouter.ai/api/v1",
-        "LLM_API_KEY": "or-key",
-        "QUERY_LLM_MODEL": "gpt-5.4-mini",
-        "QUERY_LLM_BASE_URL": "https://api.openai.com/v1",  # explicit -> OpenAI
-    })
+    mod = _reimport_server_with_env(
+        monkeypatch,
+        {
+            "OPENAI_API_KEY": "oai-key",
+            "LLM_MODEL": "deepseek/deepseek-v4-flash",
+            "LLM_BASE_URL": "https://openrouter.ai/api/v1",
+            "LLM_API_KEY": "or-key",
+            "QUERY_LLM_MODEL": "gpt-5.4-mini",
+            "QUERY_LLM_BASE_URL": "https://api.openai.com/v1",  # explicit -> OpenAI
+        },
+    )
     assert mod.LLM_MODEL == "deepseek/deepseek-v4-flash" and mod._LLM_IS_OPENAI is False
     assert mod.QUERY_LLM_MODEL == "gpt-5.4-mini"
     assert mod.QUERY_LLM_BASE_URL == "https://api.openai.com/v1"
-    assert mod.QUERY_LLM_API_KEY == "oai-key"       # different endpoint than extraction -> OPENAI_API_KEY
+    assert (
+        mod.QUERY_LLM_API_KEY == "oai-key"
+    )  # different endpoint than extraction -> OPENAI_API_KEY
     assert mod.QUERY_LLM_IS_OPENAI is True
 
 
@@ -2375,7 +2727,11 @@ def test_active_llm_cfg_switches_on_phase(monkeypatch):
     token = server._llm_phase.set("extract")
     try:
         assert server._active_llm_cfg() == (
-            "extract-model", "https://openrouter.ai/api/v1", "or-key", False)
+            "extract-model",
+            "https://openrouter.ai/api/v1",
+            "or-key",
+            False,
+        )
     finally:
         server._llm_phase.reset(token)
 
@@ -2427,8 +2783,7 @@ def _install_fake_openai(monkeypatch, captured):
     class _FakeClient:
         def __init__(self, api_key=None, base_url=None):
             captured.append(("client", api_key, base_url))
-            self.chat = SimpleNamespace(
-                completions=SimpleNamespace(create=self._create))
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
         async def _create(self, model=None, messages=None, **kw):
             captured.append(("create", model))
@@ -2479,9 +2834,11 @@ async def test_llm_func_uses_extract_cfg_in_extract_phase(monkeypatch):
 # is hardcoded to OpenAI. Companion to the phase-split LLM tests above.
 # --------------------------------------------------------------------------- #
 
+
 def _install_fake_openai_full(monkeypatch, captured):
     """Fake `openai` exposing embeddings + chat + audio, recording constructor kwargs
     and each method's model/kwargs into `captured`."""
+
     class _EmbResp:
         def __init__(self):
             self.data = [SimpleNamespace(embedding=[0.1, 0.2, 0.3])]
@@ -2515,6 +2872,7 @@ def _install_fake_openai_full(monkeypatch, captured):
 @pytest.mark.asyncio
 async def test_embedding_func_routes_to_configured_endpoint(monkeypatch):
     import numpy as np
+
     captured = {}
     _install_fake_openai_full(monkeypatch, captured)
     monkeypatch.setattr(server, "EMBEDDING_BASE_URL", "http://local-embed:1234/v1")
@@ -2591,7 +2949,10 @@ async def test_transcribe_audio_routes_and_uses_configured_model(tmp_path, monke
     audio = tmp_path / "clip.mp3"
     audio.write_bytes(b"RIFF....")
     out = await server._transcribe_audio(audio)
-    assert captured["init"] == {"api_key": "whisper-key", "base_url": "http://local-whisper:9000/v1"}
+    assert captured["init"] == {
+        "api_key": "whisper-key",
+        "base_url": "http://local-whisper:9000/v1",
+    }
     assert captured["transcribe"]["model"] == "faster-whisper-large-v3"
     assert out == "transcript text"
 
@@ -2600,8 +2961,10 @@ async def test_transcribe_audio_routes_and_uses_configured_model(tmp_path, monke
 # Token auth (API_TOKENS) — opt-in, Bearer for machines / Basic for browsers
 # --------------------------------------------------------------------------- #
 
+
 def _basic_header(username: str, password: str) -> str:
     import base64
+
     return "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode()
 
 
@@ -2625,7 +2988,8 @@ async def test_missing_credentials_401(client):
 async def test_valid_bearer_200(client):
     server.API_TOKENS = ["testtok"]
     resp = await client.post(
-        f"{WS}/query", json={"query": "test"},
+        f"{WS}/query",
+        json={"query": "test"},
         headers={"Authorization": "Bearer testtok"},
     )
     assert resp.status_code == 200
@@ -2636,7 +3000,8 @@ async def test_valid_basic_token_as_password_200(client):
     # Humans in a browser: any username + the token as the password.
     server.API_TOKENS = ["testtok"]
     resp = await client.post(
-        f"{WS}/query", json={"query": "test"},
+        f"{WS}/query",
+        json={"query": "test"},
         headers={"Authorization": _basic_header("anyone", "testtok")},
     )
     assert resp.status_code == 200
@@ -2646,7 +3011,8 @@ async def test_valid_basic_token_as_password_200(client):
 async def test_wrong_token_401(client):
     server.API_TOKENS = ["testtok"]
     resp = await client.post(
-        f"{WS}/query", json={"query": "test"},
+        f"{WS}/query",
+        json={"query": "test"},
         headers={"Authorization": "Bearer wrong"},
     )
     assert resp.status_code == 401
@@ -2673,7 +3039,8 @@ async def test_multiple_tokens_each_valid(client):
     server.API_TOKENS = ["tok1", "tok2"]
     for tok in ("tok1", "tok2"):
         resp = await client.post(
-            f"{WS}/query", json={"query": "test"},
+            f"{WS}/query",
+            json={"query": "test"},
             headers={"Authorization": f"Bearer {tok}"},
         )
         assert resp.status_code == 200
@@ -2682,6 +3049,7 @@ async def test_multiple_tokens_each_valid(client):
 # --------------------------------------------------------------------------- #
 # Low-hanging hardening — error hygiene, log level, input bounds
 # --------------------------------------------------------------------------- #
+
 
 @pytest.mark.asyncio
 async def test_internal_error_not_leaked_to_client(client):
@@ -2696,15 +3064,18 @@ async def test_internal_error_not_leaked_to_client(client):
     assert "secret internal detail" not in body
 
 
-@pytest.mark.parametrize("value,expected", [
-    ("DEBUG", logging.DEBUG),
-    ("info", logging.INFO),
-    (None, logging.INFO),
-    ("", logging.INFO),
-    ("bogus", logging.INFO),
-    ("WARNING", logging.WARNING),
-    ("  Error  ", logging.ERROR),
-])
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("DEBUG", logging.DEBUG),
+        ("info", logging.INFO),
+        (None, logging.INFO),
+        ("", logging.INFO),
+        ("bogus", logging.INFO),
+        ("WARNING", logging.WARNING),
+        ("  Error  ", logging.ERROR),
+    ],
+)
 def test_log_level_from_env(value, expected):
     assert server._log_level_from_env(value) == expected
 
@@ -2737,11 +3108,18 @@ async def test_query_data_invalid_mode_422(client):
 # Reference real-path resolution (lightrag_key) + no-internal-leak
 # --------------------------------------------------------------------------- #
 
+
 def _meta_row(lightrag_key, file_path, file, **over):
     row = {
-        "lightrag_key": lightrag_key, "file_path": file_path, "file": file,
-        "job_id": None, "description": None, "source_path": None,
-        "last_modified_time": None, "uploaded_at": None, "llm_model_extracted": None,
+        "lightrag_key": lightrag_key,
+        "file_path": file_path,
+        "file": file,
+        "job_id": None,
+        "description": None,
+        "source_path": None,
+        "last_modified_time": None,
+        "uploaded_at": None,
+        "llm_model_extracted": None,
     }
     row.update(over)
     return row
@@ -2772,7 +3150,7 @@ async def test_process_file_captures_stored_key_from_docstatus(tmp_path):
         doc_id, key = await server._process_file(path, rag_stub, file_path="j_r.txt")
     finally:
         rag_stub.lightrag.aget_docs_by_ids.return_value = _AnyKeyDocs()
-    assert key == "canon_r.txt"   # LightRAG's stored value, not our input "j_r.txt"
+    assert key == "canon_r.txt"  # LightRAG's stored value, not our input "j_r.txt"
 
 
 @pytest.mark.asyncio
@@ -2782,10 +3160,21 @@ async def test_lightrag_key_persisted_on_done(tmp_path):
     path = tmp_path / "aaa_f.txt"
     path.write_text("content")
     job_id = "keyjob"
-    server._jobs[job_id] = {"job_id": job_id, "file": "f.txt", "workspace": "alex",
-                            "status": "pending", "attempts": 0, "error": None, "batch_id": "b"}
-    with patch.object(server, "_process_file", new=AsyncMock(return_value=("doc-1", "keyjob_f.txt"))), \
-         patch.object(server, "get_workspace_rag", new=AsyncMock(return_value=rag_stub)):
+    server._jobs[job_id] = {
+        "job_id": job_id,
+        "file": "f.txt",
+        "workspace": "alex",
+        "status": "pending",
+        "attempts": 0,
+        "error": None,
+        "batch_id": "b",
+    }
+    with (
+        patch.object(
+            server, "_process_file", new=AsyncMock(return_value=("doc-1", "keyjob_f.txt"))
+        ),
+        patch.object(server, "get_workspace_rag", new=AsyncMock(return_value=rag_stub)),
+    ):
         await server._process_job("alex", job_id, path, "", None)
     key_calls = [c for c in _mock_pool.execute.call_args_list if "SET lightrag_key" in str(c)]
     assert key_calls, "expected an UPDATE ... SET lightrag_key"
@@ -2798,11 +3187,13 @@ async def test_reference_resolves_basename_key_to_real_path(client):
     server._db_pool = _mock_pool
     _mock_pool.fetch.reset_mock()
     _mock_pool.fetch.return_value = [
-        _meta_row("ab12_cv.pdf", "/corpus/career/cv.pdf", "cv.pdf", job_id="ab12", description="CV")]
+        _meta_row("ab12_cv.pdf", "/corpus/career/cv.pdf", "cv.pdf", job_id="ab12", description="CV")
+    ]
     rag_stub.lightrag.aquery_llm.return_value = {
         "status": "success",
         "data": {"references": [{"reference_id": "1", "file_path": "ab12_cv.pdf"}]},
-        "llm_response": {"content": "a", "is_streaming": False}, "metadata": {},
+        "llm_response": {"content": "a", "is_streaming": False},
+        "metadata": {},
     }
     ref = (await client.post(f"{WS}/query", json={"query": "t"})).json()["references"][0]
     assert ref["file_path"] == "/corpus/career/cv.pdf"
@@ -2823,11 +3214,14 @@ async def test_reference_basename_collision_distinct_paths(client):
     ]
     rag_stub.lightrag.aquery_llm.return_value = {
         "status": "success",
-        "data": {"references": [
-            {"reference_id": "1", "file_path": "job1_report.pdf"},
-            {"reference_id": "2", "file_path": "job2_report.pdf"},
-        ]},
-        "llm_response": {"content": "a", "is_streaming": False}, "metadata": {},
+        "data": {
+            "references": [
+                {"reference_id": "1", "file_path": "job1_report.pdf"},
+                {"reference_id": "2", "file_path": "job2_report.pdf"},
+            ]
+        },
+        "llm_response": {"content": "a", "is_streaming": False},
+        "metadata": {},
     }
     refs = (await client.post(f"{WS}/query", json={"query": "t"})).json()["references"]
     assert refs[0]["file_path"] == "/corpus/2024/report.pdf"
@@ -2839,11 +3233,19 @@ async def test_reference_basename_collision_distinct_paths(client):
 async def test_files_endpoint_hides_lightrag_key(client):
     server._db_pool = _mock_pool
     _mock_pool.fetch.reset_mock()
-    _mock_pool.fetch.return_value = [{
-        "job_id": "j", "file": "f.txt", "file_path": "/corpus/f.txt", "source_path": None,
-        "doc_id": "doc-1", "content_hash": "h", "status": "done",
-        "last_modified_time": None, "uploaded_at": None,
-    }]
+    _mock_pool.fetch.return_value = [
+        {
+            "job_id": "j",
+            "file": "f.txt",
+            "file_path": "/corpus/f.txt",
+            "source_path": None,
+            "doc_id": "doc-1",
+            "content_hash": "h",
+            "status": "done",
+            "last_modified_time": None,
+            "uploaded_at": None,
+        }
+    ]
     files = (await client.get(f"{WS}/files")).json()["files"]
     assert files and "lightrag_key" not in files[0]
     assert files[0]["file_path"] == "/corpus/f.txt"
@@ -2860,7 +3262,9 @@ def test_safe_ref_name_strips_directories():
 def test_strip_job_prefix():
     assert server._strip_job_prefix("20ed9a7c_Tag_1.pdf") == "Tag_1.pdf"
     assert server._strip_job_prefix("beefcafe_notes.txt") == "notes.txt"
-    assert server._strip_job_prefix("no_prefix_here.txt") == "no_prefix_here.txt"  # 'no' isn't hex-run
+    assert (
+        server._strip_job_prefix("no_prefix_here.txt") == "no_prefix_here.txt"
+    )  # 'no' isn't hex-run
     assert server._strip_job_prefix("plain.txt") == "plain.txt"
     assert server._strip_job_prefix("") == ""
 
@@ -2871,8 +3275,8 @@ def test_rewrite_answer_refs_resolved_and_unresolved():
     prose = "Body.\n### References\n- [1] 20ed9a7c_Tag_1.pdf\n- [2] beefcafe_notes.txt"
     out = server._rewrite_answer_refs(prose, raw, meta)
     assert "20ed9a7c_Tag_1.pdf" not in out and "beefcafe_notes.txt" not in out
-    assert "[1] Tag_1.pdf" in out          # resolved -> clean basename (dir part dropped)
-    assert "[2] notes.txt" in out          # unresolved -> hex prefix stripped
+    assert "[1] Tag_1.pdf" in out  # resolved -> clean basename (dir part dropped)
+    assert "[2] notes.txt" in out  # unresolved -> hex prefix stripped
     # empty / no-refs are no-ops
     assert server._rewrite_answer_refs("", raw, meta) == ""
     assert server._rewrite_answer_refs("text", [], {}) == "text"
@@ -2886,7 +3290,7 @@ def test_rewrite_answer_refs_no_partial_substring_hit():
     out = server._rewrite_answer_refs(prose, raw, meta)
     # longest-first replacement keeps the longer token intact as its own stripped form
     assert "aa11beef_x.txt.bak_extra" not in out
-    assert "x.txt.bak_extra" in out        # longer key stripped whole
+    assert "x.txt.bak_extra" in out  # longer key stripped whole
     assert out.count("x.txt") >= 2
 
 
@@ -2895,7 +3299,7 @@ def test_job_path_sanitizes_separators_no_traversal(tmp_path, monkeypatch):
     # workspace dir — the on-disk name is basenamed just like the LightRAG key.
     monkeypatch.setattr(server, "WORKING_DIR", str(tmp_path))
     p = server._job_path("test", "deadbeef", "nav/watchtower[spec].txt")
-    assert p.parent == tmp_path / "test"           # stays inside the workspace dir
+    assert p.parent == tmp_path / "test"  # stays inside the workspace dir
     assert p.name == "deadbeef_watchtower[spec].txt"  # separator stripped, job_id intact
     # a traversal attempt is neutralised to a plain basename under the workspace dir
     ev = server._job_path("test", "deadbeef", "../../etc/passwd")
@@ -2906,6 +3310,7 @@ def test_job_path_sanitizes_separators_no_traversal(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 # file_path_contains — blank/empty means "no filter → all data"
 # --------------------------------------------------------------------------- #
+
 
 def test_path_matches_any_blank_needles_keep_all():
     assert server._path_matches_any("/x/y.pdf", [""]) is True
@@ -2920,10 +3325,17 @@ def test_path_matches_any_blank_needles_keep_all():
 @pytest.mark.asyncio
 async def test_query_data_blank_filter_returns_all(client):
     rag_stub.lightrag.aquery_data.return_value = {
-        "status": "success", "message": "ok",
-        "data": {"entities": [{"entity_name": "A", "file_path": "/a"},
-                              {"entity_name": "B", "file_path": "/b"}],
-                 "relationships": [], "chunks": [], "references": []},
+        "status": "success",
+        "message": "ok",
+        "data": {
+            "entities": [
+                {"entity_name": "A", "file_path": "/a"},
+                {"entity_name": "B", "file_path": "/b"},
+            ],
+            "relationships": [],
+            "chunks": [],
+            "references": [],
+        },
         "metadata": {},
     }
     # Swagger's auto-populated [""] must return ALL data, not an empty set.

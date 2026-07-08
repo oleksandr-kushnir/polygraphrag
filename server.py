@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
+
 def _log_level_from_env(value: str | None) -> int:
     """Map a LOG_LEVEL env string to a logging constant; unknown/empty -> INFO (never crash
     the process on a typo). Case-insensitive; surrounding whitespace is ignored."""
@@ -29,7 +30,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi import Path as PathParam  # aliased: `Path` is pathlib.Path throughout this module
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -53,18 +54,30 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 # (lightrag_vdb_*_<model>_<dim>d). Changing the model/dim points at NEW empty tables — the
 # existing corpus must be re-ingested, and the value must stay consistent across the workspace.
 EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "").strip() or None
-EMBEDDING_API_KEY = (os.getenv("EMBEDDING_API_KEY", "").strip() or OPENAI_API_KEY) if EMBEDDING_BASE_URL else OPENAI_API_KEY
+EMBEDDING_API_KEY = (
+    (os.getenv("EMBEDDING_API_KEY", "").strip() or OPENAI_API_KEY)
+    if EMBEDDING_BASE_URL
+    else OPENAI_API_KEY
+)
 
 # Vision (PDF/image extraction). Must be a MULTIMODAL model; PDFs are sent as an OpenAI-style
 # {"type":"file"} part, so endpoints lacking that will fail on .pdf (images are more portable).
 VISION_BASE_URL = os.getenv("VISION_BASE_URL", "").strip() or None
-VISION_API_KEY = (os.getenv("VISION_API_KEY", "").strip() or OPENAI_API_KEY) if VISION_BASE_URL else OPENAI_API_KEY
+VISION_API_KEY = (
+    (os.getenv("VISION_API_KEY", "").strip() or OPENAI_API_KEY)
+    if VISION_BASE_URL
+    else OPENAI_API_KEY
+)
 _VISION_IS_OPENAI = (VISION_BASE_URL is None) or ("openai.com" in VISION_BASE_URL)
 
 # Whisper (audio transcription). Endpoint must expose the OpenAI /v1/audio/transcriptions shape.
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
 WHISPER_BASE_URL = os.getenv("WHISPER_BASE_URL", "").strip() or None
-WHISPER_API_KEY = (os.getenv("WHISPER_API_KEY", "").strip() or OPENAI_API_KEY) if WHISPER_BASE_URL else OPENAI_API_KEY
+WHISPER_API_KEY = (
+    (os.getenv("WHISPER_API_KEY", "").strip() or OPENAI_API_KEY)
+    if WHISPER_BASE_URL
+    else OPENAI_API_KEY
+)
 
 # --- LLM endpoint (entity/relationship extraction + query synthesis) ---
 # The *text* LLM (_llm_func) is routable to any third-party / local OpenAI-compatible endpoint,
@@ -73,7 +86,9 @@ WHISPER_API_KEY = (os.getenv("WHISPER_API_KEY", "").strip() or OPENAI_API_KEY) i
 #   LLM_BASE_URL set    -> that endpoint, authenticated with LLM_API_KEY
 # e.g. OpenRouter: LLM_BASE_URL=https://openrouter.ai/api/v1, LLM_MODEL=deepseek/deepseek-v4-flash
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "").strip() or None
-LLM_API_KEY = (os.getenv("LLM_API_KEY", "").strip() or OPENAI_API_KEY) if LLM_BASE_URL else OPENAI_API_KEY
+LLM_API_KEY = (
+    (os.getenv("LLM_API_KEY", "").strip() or OPENAI_API_KEY) if LLM_BASE_URL else OPENAI_API_KEY
+)
 # OpenAI's gpt-5.x reject `max_tokens` and require `max_completion_tokens`; classic
 # OpenAI-compatible providers (OpenRouter, DeepSeek, ...) want `max_tokens`.
 _LLM_IS_OPENAI = (LLM_BASE_URL is None) or ("openai.com" in LLM_BASE_URL)
@@ -98,9 +113,8 @@ QUERY_LLM_BASE_URL = os.getenv("QUERY_LLM_BASE_URL", "").strip() or LLM_BASE_URL
 if QUERY_LLM_BASE_URL is None:
     QUERY_LLM_API_KEY = OPENAI_API_KEY
 else:
-    QUERY_LLM_API_KEY = (
-        os.getenv("QUERY_LLM_API_KEY", "").strip()
-        or (LLM_API_KEY if QUERY_LLM_BASE_URL == LLM_BASE_URL else OPENAI_API_KEY)
+    QUERY_LLM_API_KEY = os.getenv("QUERY_LLM_API_KEY", "").strip() or (
+        LLM_API_KEY if QUERY_LLM_BASE_URL == LLM_BASE_URL else OPENAI_API_KEY
     )
 QUERY_LLM_IS_OPENAI = (QUERY_LLM_BASE_URL is None) or ("openai.com" in QUERY_LLM_BASE_URL)
 
@@ -135,6 +149,8 @@ def _llm_call_kwargs(kwargs: dict, is_openai: bool | None = None) -> dict:
     if "max_tokens" not in out and "max_completion_tokens" in kwargs:
         out["max_tokens"] = kwargs["max_completion_tokens"]
     return out
+
+
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres")
 POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
 POSTGRES_DB = os.getenv("POSTGRES_DB", "ragdb")
@@ -165,6 +181,7 @@ class IngestionIncompleteError(RuntimeError):
     """Raised when LightRAG stored chunks but did not fully ingest a document (e.g. entity
     extraction failed/timed out). Drives the normal retry/backoff path in _process_job."""
 
+
 # Primary (seeded) workspace. Its data physically lives under POSTGRES_WORKSPACE
 # (the legacy single-workspace value), but it is addressed by the public id below.
 # POSTGRES_WORKSPACE is read ONLY to seed this row on first boot; afterwards the
@@ -180,14 +197,18 @@ _db_pool = None  # asyncpg.Pool, set in lifespan
 
 # Per-workspace RAGAnything instance registry. Keyed by PUBLIC workspace id.
 _rag_instances: dict[str, RAGAnything] = {}
-_ws_locks: dict[str, asyncio.Lock] = {}   # one lock per workspace: guards creation AND serialises inserts
-_registry_lock = asyncio.Lock()           # guards the dicts above
+_ws_locks: dict[str, asyncio.Lock] = (
+    {}
+)  # one lock per workspace: guards creation AND serialises inserts
+_registry_lock = asyncio.Lock()  # guards the dicts above
 
 
 # --- LLM / embedding shims ---
 
+
 async def _llm_func(prompt, system_prompt=None, history_messages=[], **kwargs):
     import openai
+
     model, base_url, api_key, is_openai = _active_llm_cfg()
     logging.debug("llm call: phase=%s model=%s", _llm_phase.get(), model)
     client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
@@ -213,6 +234,7 @@ async def _vision_func(
     **kwargs,
 ):
     import openai
+
     client = openai.AsyncOpenAI(api_key=VISION_API_KEY, base_url=VISION_BASE_URL)
     if messages is not None:
         final_messages = messages
@@ -243,6 +265,7 @@ async def _vision_func(
 async def _embedding_func(texts: list[str]):
     import numpy as np
     import openai
+
     client = openai.AsyncOpenAI(api_key=EMBEDDING_API_KEY, base_url=EMBEDDING_BASE_URL)
     resp = await client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
     return np.array([d.embedding for d in resp.data])
@@ -273,7 +296,9 @@ _EXTRACTION_PROMPT = (
 
 async def _extract_with_vision(path: Path) -> str:
     import base64
+
     import openai
+
     client = openai.AsyncOpenAI(api_key=VISION_API_KEY, base_url=VISION_BASE_URL)
     b64 = base64.b64encode(path.read_bytes()).decode()
     suffix = path.suffix.lower()
@@ -287,7 +312,9 @@ async def _extract_with_vision(path: Path) -> str:
         file_part = {"type": "image_url", "image_url": {"url": f"data:image/{mime};base64,{b64}"}}
     resp = await client.chat.completions.create(
         model=VISION_MODEL,
-        messages=[{"role": "user", "content": [{"type": "text", "text": _EXTRACTION_PROMPT}, file_part]}],
+        messages=[
+            {"role": "user", "content": [{"type": "text", "text": _EXTRACTION_PROMPT}, file_part]}
+        ],
         **_llm_call_kwargs({"max_completion_tokens": 16000}, is_openai=_VISION_IS_OPENAI),
     )
     return resp.choices[0].message.content
@@ -295,6 +322,7 @@ async def _extract_with_vision(path: Path) -> str:
 
 async def _transcribe_audio(path: Path) -> str:
     import openai
+
     client = openai.AsyncOpenAI(api_key=WHISPER_API_KEY, base_url=WHISPER_BASE_URL)
     with path.open("rb") as f:
         transcript = await client.audio.transcriptions.create(
@@ -305,10 +333,16 @@ async def _transcribe_audio(path: Path) -> str:
 
 async def _convert_office_to_pdf(path: Path) -> Path:
     import tempfile
+
     out_dir = Path(tempfile.mkdtemp())
     proc = await asyncio.create_subprocess_exec(
-        "libreoffice", "--headless", "--convert-to", "pdf",
-        "--outdir", str(out_dir), str(path),
+        "libreoffice",
+        "--headless",
+        "--convert-to",
+        "pdf",
+        "--outdir",
+        str(out_dir),
+        str(path),
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
@@ -328,7 +362,8 @@ async def _count_doc_entities(rag_instance: RAGAnything, doc_id: str) -> int:
     workspace = getattr(rag_instance.lightrag, "workspace", None) or POSTGRES_WORKSPACE
     row = await _db_pool.fetchrow(
         "SELECT count FROM lightrag_full_entities WHERE workspace = $1 AND id = $2",
-        workspace, doc_id,
+        workspace,
+        doc_id,
     )
     return int(row["count"]) if row and row["count"] is not None else 0
 
@@ -346,6 +381,7 @@ def _content_doc_id(content: str) -> str:
     (ainsert(ids=[...])) and to look the record back up during verification, so the two always
     agree regardless of LightRAG's internal id derivation."""
     from lightrag.utils import compute_mdhash_id, sanitize_text_for_encoding
+
     return compute_mdhash_id(sanitize_text_for_encoding(content), prefix="doc-")
 
 
@@ -370,7 +406,10 @@ async def _verify_ingestion(
         return "failed", doc_id, f"doc_status={status}", lightrag_key
     if RAG_REQUIRE_GRAPH_EXTRACTION:
         content_length = _doc_status_field(status_doc, "content_length", None) or len(content)
-        if content_length >= RAG_MIN_CONTENT_FOR_ENTITIES and await _count_doc_entities(rag_instance, doc_id) == 0:
+        if (
+            content_length >= RAG_MIN_CONTENT_FOR_ENTITIES
+            and await _count_doc_entities(rag_instance, doc_id) == 0
+        ):
             return "failed", doc_id, "empty_graph", lightrag_key
     return "ok", doc_id, "processed", lightrag_key
 
@@ -383,7 +422,10 @@ def _join_path(path_root: str, rel_path: str) -> str:
 
 
 async def _process_file(
-    path: Path, rag_instance: RAGAnything, description_text: str = "", file_path: str | None = None,
+    path: Path,
+    rag_instance: RAGAnything,
+    description_text: str = "",
+    file_path: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Parse `path` and insert it into LightRAG, then verify the ingestion actually completed.
     `file_path` is the identity handed to LightRAG (the `{job_id}_{basename}` lightrag_input for
@@ -397,7 +439,9 @@ async def _process_file(
     token = _llm_phase.set("extract")
     logging.info(
         "extraction phase: %s will extract entities for %s (base_url=%s)",
-        LLM_MODEL, file_path or path.name, LLM_BASE_URL or "openai",
+        LLM_MODEL,
+        file_path or path.name,
+        LLM_BASE_URL or "openai",
     )
     try:
         return await _process_file_impl(path, rag_instance, description_text, file_path)
@@ -406,7 +450,10 @@ async def _process_file(
 
 
 async def _process_file_impl(
-    path: Path, rag_instance: RAGAnything, description_text: str = "", file_path: str | None = None,
+    path: Path,
+    rag_instance: RAGAnything,
+    description_text: str = "",
+    file_path: str | None = None,
 ) -> str | None:
     suffix = path.suffix.lower()
     if suffix in _VISION_SUFFIXES:
@@ -426,6 +473,7 @@ async def _process_file_impl(
             text = await _extract_with_vision(pdf_path)
         finally:
             import shutil
+
             shutil.rmtree(pdf_path.parent, ignore_errors=True)
     elif suffix in _TEXT_SUFFIXES:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -468,8 +516,8 @@ def _build_metadata(description: str, source_path: str, last_modified: str) -> s
     return description or ""
 
 
-
 # --- DB helpers ---
+
 
 async def _db_init(pool) -> None:
     await pool.execute("""
@@ -523,11 +571,14 @@ async def _db_init(pool) -> None:
     # llm_model_extracted — the text LLM (LLM_MODEL) active when this file's entities were
     # extracted. Captured at ingest; surfaced in /query references. Pre-existing rows stay NULL
     # (they were ingested before this was tracked).
-    await pool.execute("ALTER TABLE rag_file_metadata ADD COLUMN IF NOT EXISTS llm_model_extracted TEXT")
+    await pool.execute(
+        "ALTER TABLE rag_file_metadata ADD COLUMN IF NOT EXISTS llm_model_extracted TEXT"
+    )
     # Backfill lightrag_key from the old file_path (which WAS the value passed to LightRAG), so
     # pre-existing rows keep resolving without a re-ingest.
     await pool.execute(
-        "UPDATE rag_file_metadata SET lightrag_key = file_path WHERE lightrag_key IS NULL")
+        "UPDATE rag_file_metadata SET lightrag_key = file_path WHERE lightrag_key IS NULL"
+    )
     # Clean legacy display paths: rows ingested before the split stored the on-disk
     # `{job_id}_{filename}` token in file_path. Reset those to a real display value (the caller's
     # source_path, else the original filename) so references stop showing the internal token.
@@ -535,10 +586,12 @@ async def _db_init(pool) -> None:
     # left untouched.
     await pool.execute(
         "UPDATE rag_file_metadata SET file_path = COALESCE(NULLIF(source_path, ''), file) "
-        "WHERE file_path = job_id || '_' || file")
+        "WHERE file_path = job_id || '_' || file"
+    )
     await pool.execute(
         "CREATE INDEX IF NOT EXISTS idx_rag_file_metadata_lightrag_key "
-        "ON rag_file_metadata (workspace, lightrag_key)")
+        "ON rag_file_metadata (workspace, lightrag_key)"
+    )
     await _db_seed_primary_workspace(pool)
 
 
@@ -553,11 +606,15 @@ async def _db_seed_primary_workspace(pool) -> None:
         """INSERT INTO rag_workspaces (id, name, description, lightrag_workspace, is_primary)
                VALUES ($1, $2, $3, $4, TRUE)
            ON CONFLICT (id) DO NOTHING""",
-        PRIMARY_WORKSPACE_ID, PRIMARY_WORKSPACE_NAME, PRIMARY_WORKSPACE_DESCRIPTION, POSTGRES_WORKSPACE,
+        PRIMARY_WORKSPACE_ID,
+        PRIMARY_WORKSPACE_NAME,
+        PRIMARY_WORKSPACE_DESCRIPTION,
+        POSTGRES_WORKSPACE,
     )
 
 
 # --- Workspace instance registry ---
+
 
 async def _get_ws_lock(workspace_id: str) -> asyncio.Lock:
     """Get (or lazily create) the per-workspace lock. Guards instance creation and
@@ -631,8 +688,14 @@ async def get_workspace_rag(workspace_id: str) -> RAGAnything:
 
 
 async def _db_insert_job(
-    pool, record: dict, description: str, source_path: str, last_modified_time: str,
-    content_hash: str | None = None, file_path: str | None = None, lightrag_key: str | None = None,
+    pool,
+    record: dict,
+    description: str,
+    source_path: str,
+    last_modified_time: str,
+    content_hash: str | None = None,
+    file_path: str | None = None,
+    lightrag_key: str | None = None,
 ) -> None:
     await pool.execute(
         """INSERT INTO rag_file_metadata
@@ -640,23 +703,38 @@ async def _db_insert_job(
                 content_hash, file_path, lightrag_key, llm_model_extracted)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
            ON CONFLICT (job_id) DO NOTHING""",
-        record["job_id"], record["batch_id"], record["workspace"], record["file"],
-        description or None, source_path or None, last_modified_time or None,
-        content_hash or None, file_path or None, lightrag_key or None, LLM_MODEL,
+        record["job_id"],
+        record["batch_id"],
+        record["workspace"],
+        record["file"],
+        description or None,
+        source_path or None,
+        last_modified_time or None,
+        content_hash or None,
+        file_path or None,
+        lightrag_key or None,
+        LLM_MODEL,
     )
 
 
-async def _db_update_status(pool, job_id: str, status: str, attempts: int, error: str | None) -> None:
+async def _db_update_status(
+    pool, job_id: str, status: str, attempts: int, error: str | None
+) -> None:
     await pool.execute(
         "UPDATE rag_file_metadata SET status=$2, attempts=$3, error=$4 WHERE job_id=$1",
-        job_id, status, attempts, error,
+        job_id,
+        status,
+        attempts,
+        error,
     )
 
 
 async def _db_set_doc_id(pool, job_id: str, doc_id: str) -> None:
     """Persist the LightRAG doc id captured at successful ingest (the precise delete/index key)."""
     await pool.execute(
-        "UPDATE rag_file_metadata SET doc_id=$2 WHERE job_id=$1", job_id, doc_id,
+        "UPDATE rag_file_metadata SET doc_id=$2 WHERE job_id=$1",
+        job_id,
+        doc_id,
     )
 
 
@@ -664,7 +742,9 @@ async def _db_set_lightrag_key(pool, job_id: str, lightrag_key: str) -> None:
     """Persist the canonical citation key LightRAG stored (read back at ingest). This is the
     authoritative reference-join key — overwrites the provisional value set at upload time."""
     await pool.execute(
-        "UPDATE rag_file_metadata SET lightrag_key=$2 WHERE job_id=$1", job_id, lightrag_key,
+        "UPDATE rag_file_metadata SET lightrag_key=$2 WHERE job_id=$1",
+        job_id,
+        lightrag_key,
     )
 
 
@@ -740,9 +820,7 @@ def _path_matches_any(value: str | None, needles: list[str] | None) -> bool:
     return any(n.lower() in lowered for n in needles)
 
 
-async def _db_fetch_metadata_by_key(
-    pool, keys: list[str], phys: str | None
-) -> dict[str, dict]:
+async def _db_fetch_metadata_by_key(pool, keys: list[str], phys: str | None) -> dict[str, dict]:
     """Map each LightRAG citation key -> its rag_file_metadata row. Layered so a real path always
     resolves even across LightRAG canonicalization quirks:
       1. exact match on `lightrag_key` (the value LightRAG stored, read back at ingest);
@@ -751,14 +829,17 @@ async def _db_fetch_metadata_by_key(
     Newest upload wins on duplicates. `file_path` returned here is the REAL display path."""
     if not keys:
         return {}
-    cols = ("lightrag_key, file_path, file, job_id, description, source_path, "
-            "last_modified_time, uploaded_at, llm_model_extracted")
+    cols = (
+        "lightrag_key, file_path, file, job_id, description, source_path, "
+        "last_modified_time, uploaded_at, llm_model_extracted"
+    )
     if phys is not None:
         rows = await pool.fetch(
             f"SELECT {cols} FROM rag_file_metadata "
             "WHERE workspace = $2 AND (lightrag_key = ANY($1) OR file = ANY($1)) "
             "ORDER BY uploaded_at DESC",
-            keys, phys,
+            keys,
+            phys,
         )
     else:
         rows = await pool.fetch(
@@ -788,6 +869,7 @@ def _graph_field_sep() -> str:
     value; fall back to the stable literal if the import is unavailable (e.g. under test stubs)."""
     try:
         from lightrag.utils import GRAPH_FIELD_SEP as sep
+
         if isinstance(sep, str) and sep:
             return sep
     except Exception:
@@ -801,18 +883,26 @@ def _resolve_joined_path(value: str, meta_map: dict[str, dict], sep: str) -> str
     unresolved segment falls back to a prefix-stripped basename so no `{job_id}_` token surfaces."""
     return sep.join(
         ((meta_map.get(s.strip()) or {}).get("file_path") or _strip_job_prefix(s.strip()))
-        for s in value.split(sep) if s.strip())
+        for s in value.split(sep)
+        if s.strip()
+    )
 
 
 async def _resolve_block_file_paths(data: dict, phys: str | None) -> None:
     """Rewrite LightRAG's internal citation keys in entity/relationship/chunk `file_path` fields to
     the REAL document path from Postgres (same `rag_file_metadata` join as references), so the raw
     `{job_id}_{basename}` key never surfaces in `/query/data`. Multi-source fields are GRAPH_FIELD_
-    SEP-joined lists; every segment is resolved and the SEP structure preserved. Mutates in place."""
+    SEP-joined lists; every segment is resolved and the SEP structure preserved. Mutates in place.
+    """
     sep = _graph_field_sep()
     blocks = [data.get("entities") or [], data.get("relationships") or [], data.get("chunks") or []]
-    keys = {s.strip() for block in blocks for item in block
-            for s in (item.get("file_path") or "").split(sep) if s.strip()}
+    keys = {
+        s.strip()
+        for block in blocks
+        for item in block
+        for s in (item.get("file_path") or "").split(sep)
+        if s.strip()
+    }
     if not keys:
         return
     meta_map = await _db_fetch_metadata_by_key(_db_pool, list(keys), phys) if _db_pool else {}
@@ -829,8 +919,12 @@ async def _resolve_graph_paths(elements, phys: str | None) -> None:
     filter) is a GRAPH_FIELD_SEP-joined list of internal keys. Both nodes and relationships carry
     source lists, so pass them together for a single DB fetch. Mutates properties in place."""
     sep = _graph_field_sep()
-    keys = {s.strip() for el in elements
-            for s in ((el.properties or {}).get("file_path") or "").split(sep) if s.strip()}
+    keys = {
+        s.strip()
+        for el in elements
+        for s in ((el.properties or {}).get("file_path") or "").split(sep)
+        if s.strip()
+    }
     if not keys:
         return
     meta_map = await _db_fetch_metadata_by_key(_db_pool, list(keys), phys) if _db_pool else {}
@@ -855,10 +949,11 @@ async def _build_references(
     to a row, `file_path` is null (we do not echo LightRAG's raw internal value).
 
     `answered_model` is the text LLM that synthesised the answer for THIS query; added as
-    `llm_model_answered` only when supplied (so /query/data, which generates no answer, omits it)."""
+    `llm_model_answered` only when supplied (so /query/data, which generates no answer, omits it).
+    """
     keys = []
     for ref in raw_references or []:
-        keys.append(ref.get("file_path", "") or "")   # LightRAG's citation key (its internal name)
+        keys.append(ref.get("file_path", "") or "")  # LightRAG's citation key (its internal name)
     meta_map: dict[str, dict] = {}
     if any(keys) and _db_pool:
         meta_map = await _db_fetch_metadata_by_key(_db_pool, [k for k in keys if k], phys)
@@ -867,7 +962,7 @@ async def _build_references(
         m = meta_map.get(key)
         out = {
             "reference_id": ref.get("reference_id"),
-            "file_path": m.get("file_path") if m else None,   # REAL path only; never the key
+            "file_path": m.get("file_path") if m else None,  # REAL path only; never the key
             "job_id": m.get("job_id") if m else None,
             "file_description": m.get("description") if m else None,
             "last_modified_time": m.get("last_modified_time") if m else None,
@@ -886,8 +981,18 @@ async def _build_references(
 # Stable categorical palette (vis-network reads CSS color strings). Entity types are mapped to
 # colors deterministically by sorted type name, so a given type keeps its color across renders.
 _GRAPH_PALETTE = [
-    "#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f", "#edc948",
-    "#b07aa1", "#ff9da7", "#9c755f", "#bab0ac", "#1f77b4", "#d62728",
+    "#4e79a7",
+    "#f28e2b",
+    "#e15759",
+    "#76b7b2",
+    "#59a14f",
+    "#edc948",
+    "#b07aa1",
+    "#ff9da7",
+    "#9c755f",
+    "#bab0ac",
+    "#1f77b4",
+    "#d62728",
 ]
 
 
@@ -923,13 +1028,22 @@ _TOOLTIP_CSS = """
 """
 
 # Show the most useful fields first; any remaining (non-empty) fields follow in insertion order.
-_TOOLTIP_KEY_ORDER = ["entity_type", "description", "keywords", "weight", "file_path", "source_id", "created_at"]
+_TOOLTIP_KEY_ORDER = [
+    "entity_type",
+    "description",
+    "keywords",
+    "weight",
+    "file_path",
+    "source_id",
+    "created_at",
+]
 
 
 def _format_tooltip_value(key: str, value) -> str:
     """Stringify a property value for display; render epoch timestamps as readable UTC datetimes."""
     if key.endswith("_at") and isinstance(value, (int, float)) and value > 0:
         from datetime import datetime, timezone
+
         return datetime.fromtimestamp(value, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     text = str(value)
     if len(text) > 800:
@@ -973,8 +1087,12 @@ def _build_graph_html(kg, physics: bool) -> str:
     color_of = {t: _GRAPH_PALETTE[i % len(_GRAPH_PALETTE)] for i, t in enumerate(types)}
 
     net = Network(
-        height="100vh", width="100%", directed=True,
-        bgcolor="#1a1a1a", font_color="#eaeaea", cdn_resources="in_line",
+        height="100vh",
+        width="100%",
+        directed=True,
+        bgcolor="#1a1a1a",
+        font_color="#eaeaea",
+        cdn_resources="in_line",
     )
     net.toggle_physics(physics)
 
@@ -1031,7 +1149,7 @@ async def _db_reload_jobs(pool) -> None:
     for row in rows:
         row = dict(row)
         job_id = row["job_id"]
-        physical = row["workspace"]   # rag_file_metadata stores the physical workspace
+        physical = row["workspace"]  # rag_file_metadata stores the physical workspace
         # Resolve the public id the worker uses to route to the right instance.
         pub_row = await pool.fetchrow(
             "SELECT id FROM rag_workspaces WHERE lightrag_workspace = $1 AND deleted_at IS NULL "
@@ -1051,7 +1169,9 @@ async def _db_reload_jobs(pool) -> None:
         _batches.setdefault(row["batch_id"], []).append(record)
         dest = Path(WORKING_DIR) / physical / f"{job_id}_{row['file']}"
         if pub_row is not None and dest.exists():
-            description_text = _build_metadata(row["description"] or "", row["source_path"] or "", row["last_modified_time"] or "")
+            description_text = _build_metadata(
+                row["description"] or "", row["source_path"] or "", row["last_modified_time"] or ""
+            )
             # Re-hand LightRAG the same identity (lightrag_input), NOT the real display file_path.
             lightrag_input = f"{job_id}_{_safe_ref_name(row['file'])}"
             await _db_update_status(pool, job_id, "pending", row["attempts"], None)
@@ -1059,13 +1179,20 @@ async def _db_reload_jobs(pool) -> None:
         else:
             record["status"] = "failed"
             record["error"] = "File missing after restart"
-            await _db_update_status(pool, job_id, "failed", row["attempts"], "File missing after restart")
+            await _db_update_status(
+                pool, job_id, "failed", row["attempts"], "File missing after restart"
+            )
 
 
 # --- Background worker ---
 
+
 async def _process_job(
-    workspace_id: str, job_id: str, dest: Path, description_text: str, file_path: str | None = None,
+    workspace_id: str,
+    job_id: str,
+    dest: Path,
+    description_text: str,
+    file_path: str | None = None,
 ) -> None:
     """Process one queued job into its workspace, with retry/backoff bookkeeping.
     Resolves the workspace's RAGAnything instance and serialises the insert on that
@@ -1079,7 +1206,8 @@ async def _process_job(
         lock = await _get_ws_lock(workspace_id)
         async with lock:
             result = await _process_file(
-                dest, rag_instance, description_text=description_text, file_path=file_path)
+                dest, rag_instance, description_text=description_text, file_path=file_path
+            )
         # `_process_file` returns (doc_id, lightrag_key); tolerate a bare doc_id from older mocks.
         doc_id, lightrag_key = result if isinstance(result, tuple) else (result, None)
         job["status"] = "done"
@@ -1119,6 +1247,7 @@ async def _worker():
 
 # --- Startup / shutdown ---
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _db_pool
@@ -1127,9 +1256,13 @@ async def lifespan(app: FastAPI):
     Path(WORKING_DIR).mkdir(parents=True, exist_ok=True)
 
     _db_pool = await asyncpg.create_pool(
-        host=POSTGRES_HOST, port=int(POSTGRES_PORT), database=POSTGRES_DB,
-        user=POSTGRES_USER, password=POSTGRES_PASSWORD,
-        min_size=2, max_size=10,
+        host=POSTGRES_HOST,
+        port=int(POSTGRES_PORT),
+        database=POSTGRES_DB,
+        user=POSTGRES_USER,
+        password=POSTGRES_PASSWORD,
+        min_size=2,
+        max_size=10,
     )
     await _db_init(_db_pool)
     await _db_reload_jobs(_db_pool)
@@ -1176,6 +1309,7 @@ app = FastAPI(
 
 
 # --- Auth (opt-in via API_TOKENS) ---
+
 
 def _auth_enabled() -> bool:
     """True when at least one API token is configured (read live so tests can toggle it)."""
@@ -1226,6 +1360,7 @@ async def _require_auth(request: Request, call_next):
 
 # --- Helpers ---
 
+
 def _batch_summary(entries: list[dict]) -> dict:
     counts: dict[str, int] = {}
     for e in entries:
@@ -1261,26 +1396,39 @@ _TOP_K_MAX = 1000
 
 
 class QueryRequest(BaseModel):
-    query: str = Field(description="The natural-language question to ask the workspace's corpus.",
-                       examples=["What did the Q3 report say about churn?"])
+    query: str = Field(
+        description="The natural-language question to ask the workspace's corpus.",
+        examples=["What did the Q3 report say about churn?"],
+    )
     mode: QueryMode = Field("mix", description=_MODE_DESC)
     include_references: bool = Field(
-        True, description="Include source-document citations in the response. Default true.")
+        True, description="Include source-document citations in the response. Default true."
+    )
     # LightRAG's tuned default (entities/relations retrieved per keyword set).
     top_k: int = Field(
-        40, ge=1, le=_TOP_K_MAX,
-        description=f"Entities/relationships retrieved per keyword set. Default 40, max {_TOP_K_MAX}.")
+        40,
+        ge=1,
+        le=_TOP_K_MAX,
+        description=f"Entities/relationships retrieved per keyword set. Default 40, max {_TOP_K_MAX}.",
+    )
 
 
 class QueryDataRequest(BaseModel):
-    query: str = Field(description="The natural-language question used to retrieve graph/vector data.",
-                       examples=["List the entities related to onboarding."])
+    query: str = Field(
+        description="The natural-language question used to retrieve graph/vector data.",
+        examples=["List the entities related to onboarding."],
+    )
     mode: QueryMode = Field("mix", description=_MODE_DESC)
     include_references: bool = Field(
-        True, description="Resolve and include source-document references for retrieved data. Default true.")
+        True,
+        description="Resolve and include source-document references for retrieved data. Default true.",
+    )
     top_k: int = Field(
-        40, ge=1, le=_TOP_K_MAX,
-        description=f"Entities/relationships retrieved per keyword set. Default 40, max {_TOP_K_MAX}.")
+        40,
+        ge=1,
+        le=_TOP_K_MAX,
+        description=f"Entities/relationships retrieved per keyword set. Default 40, max {_TOP_K_MAX}.",
+    )
     file_path_contains: list[str] = Field(
         default_factory=list,
         description=(
@@ -1290,32 +1438,44 @@ class QueryDataRequest(BaseModel):
             "is kept if its file_path contains ANY of the strings (blank strings are ignored). "
             "Matching runs AFTER retrieval (the retrieval budget is auto-boosted when set), so a "
             "very narrow folder may return fewer items than exist. "
-            "Example (to narrow): [\"/corpus/career/\", \"/corpus/projects/\"]."))
+            'Example (to narrow): ["/corpus/career/", "/corpus/projects/"].'
+        ),
+    )
 
 
 class WorkspaceCreate(BaseModel):
     id: str = Field(
         description="Workspace slug — must match ^[a-z][a-z0-9_]{0,47}$. Also used as the storage namespace.",
-        examples=["acme_corp"])
-    name: str = Field(description="Human-readable display name for the workspace.", examples=["Acme Corp"])
-    description: str | None = Field(None, description="Optional free-text description of the workspace.")
+        examples=["acme_corp"],
+    )
+    name: str = Field(
+        description="Human-readable display name for the workspace.", examples=["Acme Corp"]
+    )
+    description: str | None = Field(
+        None, description="Optional free-text description of the workspace."
+    )
     # `lightrag_workspace` is deliberately NOT a field: for API-created workspaces the
     # service forces lightrag_workspace == id. Any client-supplied value is ignored.
 
 
 class FileDeleteRequest(BaseModel):
     rel_path: str | None = Field(
-        None, description="Workspace-relative path of the file (matched against the stored source_path).")
+        None,
+        description="Workspace-relative path of the file (matched against the stored source_path).",
+    )
     external_path: str | None = Field(
-        None, description="Caller-supplied absolute path (matched against the stored LightRAG file_path).")
+        None,
+        description="Caller-supplied absolute path (matched against the stored LightRAG file_path).",
+    )
     doc_id: str | None = Field(
-        None, description="LightRAG doc id (`doc-<md5>`). If given, used directly — most precise.")
+        None, description="LightRAG doc id (`doc-<md5>`). If given, used directly — most precise."
+    )
 
 
 @app.get(
     "/health",
     summary="Liveness probe",
-    description="Returns `{\"status\": \"ok\"}` when the service is up. Does not check DB connectivity.",
+    description='Returns `{"status": "ok"}` when the service is up. Does not check DB connectivity.',
 )
 async def health():
     return {"status": "ok"}
@@ -1379,6 +1539,7 @@ async def _purge_workspace_data(pool, physical_workspace: str) -> None:
     # 3. Delete file metadata rows and the on-disk files directory.
     await pool.execute("DELETE FROM rag_file_metadata WHERE workspace = $1", physical_workspace)
     import shutil
+
     shutil.rmtree(Path(WORKING_DIR) / physical_workspace, ignore_errors=True)
 
 
@@ -1398,7 +1559,9 @@ async def _evict_workspace_instance(workspace_id: str) -> None:
     responses={503: {"description": "Database not initialised yet"}},
 )
 async def list_workspaces(
-    deleted: bool = Query(False, description="If true, return soft-deleted workspaces instead of active ones."),
+    deleted: bool = Query(
+        False, description="If true, return soft-deleted workspaces instead of active ones."
+    ),
 ):
     if _db_pool is None:
         raise HTTPException(503, "DB not initialised")
@@ -1432,7 +1595,10 @@ async def create_workspace(body: WorkspaceCreate):
     await _db_pool.execute(
         """INSERT INTO rag_workspaces (id, name, description, lightrag_workspace, is_primary)
                VALUES ($1, $2, $3, $4, FALSE)""",
-        body.id, body.name, body.description, body.id,   # lightrag_workspace := id
+        body.id,
+        body.name,
+        body.description,
+        body.id,  # lightrag_workspace := id
     )
     return {"id": body.id, "name": body.name, "description": body.description}
 
@@ -1453,7 +1619,9 @@ async def create_workspace(body: WorkspaceCreate):
 )
 async def delete_workspace(
     workspace_id: str = PathParam(description="Public workspace id (slug) to delete."),
-    purge: bool = Query(False, description="If true, irreversibly purge all data instead of soft-deleting."),
+    purge: bool = Query(
+        False, description="If true, irreversibly purge all data instead of soft-deleting."
+    ),
 ):
     if _db_pool is None:
         raise HTTPException(503, "DB not initialised")
@@ -1467,7 +1635,9 @@ async def delete_workspace(
         await _purge_workspace_data(_db_pool, row["lightrag_workspace"])
         await _db_pool.execute("DELETE FROM rag_workspaces WHERE id = $1", workspace_id)
         return {"status": "purged", "id": workspace_id}
-    await _db_pool.execute("UPDATE rag_workspaces SET deleted_at = NOW() WHERE id = $1", workspace_id)
+    await _db_pool.execute(
+        "UPDATE rag_workspaces SET deleted_at = NOW() WHERE id = $1", workspace_id
+    )
     await _evict_workspace_instance(workspace_id)
     return {"status": "soft-deleted", "id": workspace_id}
 
@@ -1489,7 +1659,9 @@ async def restore_workspace(
     row = await _db_get_workspace_any(_db_pool, workspace_id)
     if row is None or row["deleted_at"] is None:
         raise HTTPException(404, f"No soft-deleted workspace {workspace_id!r} to restore")
-    await _db_pool.execute("UPDATE rag_workspaces SET deleted_at = NULL WHERE id = $1", workspace_id)
+    await _db_pool.execute(
+        "UPDATE rag_workspaces SET deleted_at = NULL WHERE id = $1", workspace_id
+    )
     return {"status": "restored", "id": workspace_id}
 
 
@@ -1534,14 +1706,20 @@ async def workspace_status(
         raise HTTPException(404, f"Workspace {workspace_id!r} not found")
     phys = row["lightrag_workspace"]
     doc_rows = await _db_pool.fetch(
-        "SELECT status, count(*) AS n FROM lightrag_doc_status WHERE workspace=$1 GROUP BY status", phys)
+        "SELECT status, count(*) AS n FROM lightrag_doc_status WHERE workspace=$1 GROUP BY status",
+        phys,
+    )
     docs_by_status = {r["status"]: r["n"] for r in doc_rows}
     chunks = await _db_pool.fetchval(
-        "SELECT COALESCE(SUM(chunks_count),0) FROM lightrag_doc_status WHERE workspace=$1", phys)
+        "SELECT COALESCE(SUM(chunks_count),0) FROM lightrag_doc_status WHERE workspace=$1", phys
+    )
     job_rows = await _db_pool.fetch(
-        "SELECT status, count(*) AS n FROM rag_file_metadata WHERE workspace=$1 GROUP BY status", phys)
+        "SELECT status, count(*) AS n FROM rag_file_metadata WHERE workspace=$1 GROUP BY status",
+        phys,
+    )
     last_uploaded = await _db_pool.fetchval(
-        "SELECT MAX(uploaded_at) FROM rag_file_metadata WHERE workspace=$1", phys)
+        "SELECT MAX(uploaded_at) FROM rag_file_metadata WHERE workspace=$1", phys
+    )
     return {
         "id": row["id"],
         "name": row["name"],
@@ -1554,12 +1732,15 @@ async def workspace_status(
         "relationships": await _count_vdb(phys, "relation"),
         "ingest": {
             "by_status": {r["status"]: r["n"] for r in job_rows},
-            "last_uploaded_at": last_uploaded.isoformat() if hasattr(last_uploaded, "isoformat") else last_uploaded,
+            "last_uploaded_at": (
+                last_uploaded.isoformat() if hasattr(last_uploaded, "isoformat") else last_uploaded
+            ),
         },
     }
 
 
 # --- Workspace-scoped data API (everything below lives under /workspace/{workspace_id}) ---
+
 
 async def require_workspace(workspace_id: str) -> dict:
     """Path dependency: validate the slug and confirm the workspace is active.
@@ -1632,11 +1813,7 @@ async def require_workspace(workspace_id: str) -> dict:
                             },
                         },
                     },
-                    "encoding": {
-                        "metadata": {
-                            "contentType": "application/json"
-                        }
-                    },
+                    "encoding": {"metadata": {"contentType": "application/json"}},
                 }
             },
         }
@@ -1647,8 +1824,8 @@ async def upload_batch(
     files: list[UploadFile] = File(...),
     ws: dict = Depends(require_workspace),
 ):
-    pub = ws["id"]                      # public id → routes the worker to the right instance
-    phys = ws["lightrag_workspace"]     # physical workspace → storage namespace + metadata tag
+    pub = ws["id"]  # public id → routes the worker to the right instance
+    phys = ws["lightrag_workspace"]  # physical workspace → storage namespace + metadata tag
     form = await request.form()
     metadata_field = form.get("metadata", "[]")
     if hasattr(metadata_field, "read"):
@@ -1682,10 +1859,10 @@ async def upload_batch(
         job_id = uuid.uuid4().hex[:8]
         dest = _job_path(phys, job_id, file.filename)
         m = meta_list[i] if i < len(meta_list) else {}
-        description      = m.get("description", "") or ""
-        source_path      = m.get("source_path", "") or ""
-        last_modified    = m.get("last_modified_time", "") or ""
-        path_root        = m.get("path_root", "") or ""
+        description = m.get("description", "") or ""
+        source_path = m.get("source_path", "") or ""
+        last_modified = m.get("last_modified_time", "") or ""
+        path_root = m.get("path_root", "") or ""
         try:
             raw = await file.read()
             with dest.open("wb") as fh:
@@ -1699,8 +1876,11 @@ async def upload_batch(
             #    path_root/source_path join when given, else source_path, else the plain filename.
             #    Never the on-disk `{job_id}_` token.
             lightrag_input = f"{job_id}_{_safe_ref_name(file.filename)}"
-            display_path = (_join_path(path_root, source_path) if (path_root and source_path)
-                            else (source_path or _safe_ref_name(file.filename)))
+            display_path = (
+                _join_path(path_root, source_path)
+                if (path_root and source_path)
+                else (source_path or _safe_ref_name(file.filename))
+            )
             description_text = _build_metadata(description, source_path, last_modified)
             record: dict = {
                 "job_id": job_id,
@@ -1716,18 +1896,27 @@ async def upload_batch(
             _jobs[job_id] = record
             entries.append(record)
             if _db_pool:
-                await _db_insert_job(_db_pool, record, description, source_path, last_modified,
-                                     content_hash=content_hash, file_path=display_path,
-                                     lightrag_key=lightrag_input)
+                await _db_insert_job(
+                    _db_pool,
+                    record,
+                    description,
+                    source_path,
+                    last_modified,
+                    content_hash=content_hash,
+                    file_path=display_path,
+                    lightrag_key=lightrag_input,
+                )
             await _job_queue.put((pub, job_id, dest, description_text, lightrag_input))
         except Exception as exc:
-            entries.append({
-                "file": file.filename,
-                "workspace": phys,
-                "status": "save_failed",
-                "error": str(exc),
-                "batch_id": batch_id,
-            })
+            entries.append(
+                {
+                    "file": file.filename,
+                    "workspace": phys,
+                    "status": "save_failed",
+                    "error": str(exc),
+                    "batch_id": batch_id,
+                }
+            )
     _batches[batch_id] = entries
     return _batch_response(batch_id, entries)
 
@@ -1836,15 +2025,22 @@ async def list_files(ws: dict = Depends(require_workspace)):
     return {"files": [_file_index_row(r) for r in rows]}
 
 
-async def _resolve_doc_for_delete(phys: str, body: FileDeleteRequest) -> tuple[str | None, dict | None]:
+async def _resolve_doc_for_delete(
+    phys: str, body: FileDeleteRequest
+) -> tuple[str | None, dict | None]:
     """Resolve the target (doc_id, metadata_row) for a per-file delete. Order: explicit doc_id →
     metadata match on file_path/source_path → LightRAG doc_status by file_path. Returns (None, None)
     if nothing matches (deleting an absent file is a no-op success)."""
     if body.doc_id:
-        row = await _db_pool.fetchrow(
-            "SELECT job_id, file, doc_id FROM rag_file_metadata WHERE workspace=$1 AND doc_id=$2 LIMIT 1",
-            phys, body.doc_id,
-        ) if _db_pool else None
+        row = (
+            await _db_pool.fetchrow(
+                "SELECT job_id, file, doc_id FROM rag_file_metadata WHERE workspace=$1 AND doc_id=$2 LIMIT 1",
+                phys,
+                body.doc_id,
+            )
+            if _db_pool
+            else None
+        )
         return body.doc_id, (dict(row) if row else None)
     if _db_pool is not None:
         for col, val in (("file_path", body.external_path), ("source_path", body.rel_path)):
@@ -1853,7 +2049,8 @@ async def _resolve_doc_for_delete(phys: str, body: FileDeleteRequest) -> tuple[s
             row = await _db_pool.fetchrow(
                 f"SELECT job_id, file, doc_id FROM rag_file_metadata WHERE workspace=$1 AND {col}=$2 "
                 "ORDER BY uploaded_at DESC LIMIT 1",
-                phys, val,
+                phys,
+                val,
             )
             if row and row["doc_id"]:
                 return row["doc_id"], dict(row)
@@ -1862,7 +2059,8 @@ async def _resolve_doc_for_delete(phys: str, body: FileDeleteRequest) -> tuple[s
             ds = await _db_pool.fetchrow(
                 "SELECT id FROM lightrag_doc_status WHERE workspace=$1 AND file_path=$2 "
                 "ORDER BY updated_at DESC LIMIT 1",
-                phys, body.external_path,
+                phys,
+                body.external_path,
             )
             if ds:
                 return ds["id"], None
@@ -1902,7 +2100,9 @@ async def delete_file(body: FileDeleteRequest, ws: dict = Depends(require_worksp
         except Exception as exc:
             raise _internal_error(exc, f"delete of doc {doc_id}") from exc
     # Drop the index row(s) and any leftover raw file.
-    await _db_pool.execute("DELETE FROM rag_file_metadata WHERE workspace=$1 AND doc_id=$2", phys, doc_id)
+    await _db_pool.execute(
+        "DELETE FROM rag_file_metadata WHERE workspace=$1 AND doc_id=$2", phys, doc_id
+    )
     if meta and meta.get("job_id") and meta.get("file"):
         _job_path(phys, meta["job_id"], meta["file"]).unlink(missing_ok=True)
     return {"status": "deleted", "doc_id": doc_id}
@@ -1924,11 +2124,14 @@ async def query(req: QueryRequest, ws: dict = Depends(require_workspace)):
     rag_instance = await get_workspace_rag(ws["id"])
     try:
         from lightrag import QueryParam
+
         raw = await rag_instance.lightrag.aquery_llm(
             req.query,
             param=_query_param(
-                QueryParam, mode=req.mode,
-                include_references=req.include_references, top_k=req.top_k,
+                QueryParam,
+                mode=req.mode,
+                include_references=req.include_references,
+                top_k=req.top_k,
             ),
         )
     except Exception as exc:
@@ -1938,7 +2141,8 @@ async def query(req: QueryRequest, ws: dict = Depends(require_workspace)):
     raw_refs = (raw.get("data") or {}).get("references")
     # Build the key→row map even to only rewrite the prose; emit the structured refs when asked.
     references, meta_map = await _build_references(
-        raw_refs, ws["lightrag_workspace"], answered_model=QUERY_LLM_MODEL)
+        raw_refs, ws["lightrag_workspace"], answered_model=QUERY_LLM_MODEL
+    )
     result = _rewrite_answer_refs(result, raw_refs, meta_map)
     return {"result": result, "references": references if req.include_references else []}
 
@@ -1956,18 +2160,19 @@ async def query(req: QueryRequest, ws: dict = Depends(require_workspace)):
         "them. Empty/omitted = no filtering. The retrieval budget is auto-boosted when a filter is set, "
         "but matching happens *after* retrieval, so a very narrow folder may return fewer items than "
         "exist in it. Example body: "
-        "`{\"query\":\"...\",\"file_path_contains\":[\"/opt/data/workspace/career/\"]}`."
+        '`{"query":"...","file_path_contains":["/opt/data/workspace/career/"]}`.'
     ),
     responses={404: {"description": "Workspace not found or soft-deleted"}},
 )
 async def query_data(req: QueryDataRequest, ws: dict = Depends(require_workspace)):
     rag_instance = await get_workspace_rag(ws["id"])
-    needles = _clean_needles(req.file_path_contains)   # blank/empty => no filter (all data)
+    needles = _clean_needles(req.file_path_contains)  # blank/empty => no filter (all data)
     # Post-filter runs after retrieval; widen the candidate set so a narrow folder still has hits.
     top_k = req.top_k * RAG_FILTER_TOPK_BOOST if needles else req.top_k
     chunk_top_k = None if not needles else req.top_k * RAG_FILTER_TOPK_BOOST
     try:
         from lightrag import QueryParam
+
         raw = await rag_instance.lightrag.aquery_data(
             req.query,
             param=_query_param(QueryParam, mode=req.mode, top_k=top_k, chunk_top_k=chunk_top_k),
@@ -1981,13 +2186,23 @@ async def query_data(req: QueryDataRequest, ws: dict = Depends(require_workspace
     await _resolve_block_file_paths(data, ws["lightrag_workspace"])
     if needles:
         data["entities"] = [
-            e for e in (data.get("entities") or []) if _path_matches_any(e.get("file_path"), needles)]
+            e
+            for e in (data.get("entities") or [])
+            if _path_matches_any(e.get("file_path"), needles)
+        ]
         data["relationships"] = [
-            r for r in (data.get("relationships") or []) if _path_matches_any(r.get("file_path"), needles)]
+            r
+            for r in (data.get("relationships") or [])
+            if _path_matches_any(r.get("file_path"), needles)
+        ]
         data["chunks"] = [
-            c for c in (data.get("chunks") or []) if _path_matches_any(c.get("file_path"), needles)]
-    references, _ = await _build_references(
-        data.get("references"), ws["lightrag_workspace"]) if req.include_references else ([], {})
+            c for c in (data.get("chunks") or []) if _path_matches_any(c.get("file_path"), needles)
+        ]
+    references, _ = (
+        await _build_references(data.get("references"), ws["lightrag_workspace"])
+        if req.include_references
+        else ([], {})
+    )
     if needles:
         references = [r for r in references if _path_matches_any(r.get("file_path"), needles)]
     return {
@@ -2035,11 +2250,13 @@ async def graph_html(
         description="Entity name to center the subgraph on. Use '*' (default) for the entire graph.",
     ),
     max_depth: int = Query(
-        3, ge=1,
+        3,
+        ge=1,
         description="Maximum number of relationship hops to expand out from the starting node(s). Default 3.",
     ),
     max_nodes: int = Query(
-        1000, ge=1,
+        1000,
+        ge=1,
         description="Hard cap on nodes returned; closest / highest-degree nodes win when truncated. Default 1000.",
     ),
     physics: bool = Query(
@@ -2052,17 +2269,20 @@ async def graph_html(
             "Optional folder/file scope filter: repeatable case-insensitive substrings. Omit or leave "
             "empty to render the WHOLE graph (no filtering, the default). When provided, keep only nodes "
             "whose file_path contains ANY of them (OR; blank strings ignored). Applied after graph "
-            "selection, so a very narrow folder may render sparsely."),
+            "selection, so a very narrow folder may render sparsely."
+        ),
     ),
     ws: dict = Depends(require_workspace),
 ):
     rag_instance = await get_workspace_rag(ws["id"])
-    needles = _clean_needles(file_path_contains)   # blank/empty => no filter (whole graph)
+    needles = _clean_needles(file_path_contains)  # blank/empty => no filter (whole graph)
     # Post-filter runs after graph selection; widen the fetch so a narrow folder still has nodes.
     fetch_nodes = max_nodes * RAG_FILTER_TOPK_BOOST if needles else max_nodes
     try:
         kg = await rag_instance.lightrag.get_knowledge_graph(
-            node_label=node_label, max_depth=max_depth, max_nodes=fetch_nodes,
+            node_label=node_label,
+            max_depth=max_depth,
+            max_nodes=fetch_nodes,
         )
     except Exception as exc:
         raise _internal_error(exc, "graph.html") from exc
@@ -2072,7 +2292,6 @@ async def graph_html(
     await _resolve_graph_paths(list(kg.nodes) + list(kg.edges), ws["lightrag_workspace"])
     if needles:
         kg.nodes = [
-            n for n in kg.nodes
-            if _path_matches_any((n.properties or {}).get("file_path"), needles)
+            n for n in kg.nodes if _path_matches_any((n.properties or {}).get("file_path"), needles)
         ]
     return HTMLResponse(_build_graph_html(kg, physics))

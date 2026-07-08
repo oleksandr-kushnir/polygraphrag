@@ -14,3 +14,8 @@ pyvis
 pytest
 pytest-asyncio
 httpx
+
+# Lint / format / type-check (config in pyproject.toml)
+ruff
+black
+mypy

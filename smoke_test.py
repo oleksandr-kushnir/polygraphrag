@@ -9,6 +9,7 @@ sanity check of the HTTP surface, focused on the auth + hardening work.
 Run:   python smoke_test.py
 Exit:  0 if every check passes, 1 otherwise (suitable for CI / pre-deploy gating).
 """
+
 import asyncio
 import base64
 import sys
@@ -47,8 +48,9 @@ lightrag_mod.utils = lightrag_utils_mod
 sys.modules.setdefault("lightrag", lightrag_mod)
 sys.modules.setdefault("lightrag.utils", lightrag_utils_mod)
 
-import server  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
+
+import server  # noqa: E402
 
 WS = "/workspace/alex"
 TOKENS = ["smoketok", "alt-token"]
@@ -72,8 +74,11 @@ async def main() -> int:
     # Make workspace routes resolve without a DB, and hand out the stub instance.
     async def _fake_lookup(workspace_id):
         return {
-            "id": workspace_id, "name": workspace_id, "description": None,
-            "lightrag_workspace": workspace_id, "is_primary": workspace_id == "alex",
+            "id": workspace_id,
+            "name": workspace_id,
+            "description": None,
+            "lightrag_workspace": workspace_id,
+            "is_primary": workspace_id == "alex",
         }
 
     server._lookup_workspace = _fake_lookup
@@ -85,6 +90,7 @@ async def main() -> int:
 
         # ---- Pure helper: LOG_LEVEL resolver -----------------------------
         import logging
+
         check("log_level DEBUG->10", server._log_level_from_env("DEBUG") == logging.DEBUG)
         check("log_level 'info'->20", server._log_level_from_env("info") == logging.INFO)
         check("log_level None->INFO", server._log_level_from_env(None) == logging.INFO)
@@ -108,39 +114,50 @@ async def main() -> int:
 
         r = await c.post(f"{WS}/query", json={"query": "hi"})
         check("auth-on: no creds -> 401", r.status_code == 401)
-        check("auth-on: 401 sends WWW-Authenticate: Basic",
-              r.headers.get("www-authenticate", "").startswith("Basic"))
+        check(
+            "auth-on: 401 sends WWW-Authenticate: Basic",
+            r.headers.get("www-authenticate", "").startswith("Basic"),
+        )
         check("auth-on: 401 body has no internals", "smoke answer" not in r.text)
 
         r = await c.get("/openapi.json")
         check("auth-on: /openapi.json gated -> 401", r.status_code == 401)
 
-        r = await c.post(f"{WS}/query", json={"query": "hi"},
-                         headers={"Authorization": f"Bearer {TOKENS[0]}"})
+        r = await c.post(
+            f"{WS}/query", json={"query": "hi"}, headers={"Authorization": f"Bearer {TOKENS[0]}"}
+        )
         check("auth-on: valid Bearer (token 1) -> 200", r.status_code == 200)
 
-        r = await c.post(f"{WS}/query", json={"query": "hi"},
-                         headers={"Authorization": f"Bearer {TOKENS[1]}"})
+        r = await c.post(
+            f"{WS}/query", json={"query": "hi"}, headers={"Authorization": f"Bearer {TOKENS[1]}"}
+        )
         check("auth-on: valid Bearer (token 2) -> 200", r.status_code == 200)
 
-        r = await c.post(f"{WS}/query", json={"query": "hi"},
-                         headers={"Authorization": "Bearer nope"})
+        r = await c.post(
+            f"{WS}/query", json={"query": "hi"}, headers={"Authorization": "Bearer nope"}
+        )
         check("auth-on: wrong Bearer -> 401", r.status_code == 401)
 
-        r = await c.post(f"{WS}/query", json={"query": "hi"},
-                         headers={"Authorization": _basic("anyone", TOKENS[0])})
+        r = await c.post(
+            f"{WS}/query",
+            json={"query": "hi"},
+            headers={"Authorization": _basic("anyone", TOKENS[0])},
+        )
         check("auth-on: Basic (any user + token) -> 200", r.status_code == 200)
 
-        r = await c.post(f"{WS}/query", json={"query": "hi"},
-                         headers={"Authorization": _basic("anyone", "wrongpass")})
+        r = await c.post(
+            f"{WS}/query",
+            json={"query": "hi"},
+            headers={"Authorization": _basic("anyone", "wrongpass")},
+        )
         check("auth-on: Basic wrong password -> 401", r.status_code == 401)
 
-        r = await c.post(f"{WS}/query", json={"query": "hi"},
-                         headers={"Authorization": "Token abc"})
+        r = await c.post(
+            f"{WS}/query", json={"query": "hi"}, headers={"Authorization": "Token abc"}
+        )
         check("auth-on: unknown scheme -> 401", r.status_code == 401)
 
-        r = await c.post(f"{WS}/query", json={"query": "hi"},
-                         headers={"Authorization": "Bearer "})
+        r = await c.post(f"{WS}/query", json={"query": "hi"}, headers={"Authorization": "Bearer "})
         check("auth-on: empty Bearer -> 401", r.status_code == 401)
 
         # ---- Every gated route rejects missing creds ---------------------
@@ -157,8 +174,11 @@ async def main() -> int:
         ]
         for method, path in gated:
             resp = await c.request(method, path, json={} if method == "POST" else None)
-            check(f"auth-on: {method} {path} -> 401", resp.status_code == 401,
-                  f"got {resp.status_code}")
+            check(
+                f"auth-on: {method} {path} -> 401",
+                resp.status_code == 401,
+                f"got {resp.status_code}",
+            )
 
         auth = {"Authorization": f"Bearer {TOKENS[0]}"}
 
