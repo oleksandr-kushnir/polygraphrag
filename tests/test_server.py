@@ -156,9 +156,9 @@ async def client():
     `/workspace/{id}/...` routes resolve and `get_workspace_rag` returns the shared stub."""
     from httpx import ASGITransport, AsyncClient
 
-    orig_lookup = server._lookup_workspace
+    orig_lookup = server.workspaces._lookup_workspace
     orig_get = server.get_workspace_rag
-    server._lookup_workspace = _fake_lookup_workspace
+    server.workspaces._lookup_workspace = _fake_lookup_workspace
     server.get_workspace_rag = AsyncMock(return_value=rag_stub)
     try:
         async with AsyncClient(
@@ -166,7 +166,7 @@ async def client():
         ) as c:
             yield c
     finally:
-        server._lookup_workspace = orig_lookup
+        server.workspaces._lookup_workspace = orig_lookup
         server.get_workspace_rag = orig_get
 
 
@@ -1409,7 +1409,7 @@ async def test_query_unknown_workspace_404(client):
     async def _no_such(workspace_id):
         return None
 
-    server._lookup_workspace = _no_such
+    server.workspaces._lookup_workspace = _no_such
     resp = await client.post("/workspace/ghost/query/data", json={"query": "test"})
     assert resp.status_code == 404
 
@@ -1828,7 +1828,7 @@ async def test_get_workspace_rag_builds_and_caches(monkeypatch):
         built.append((wid, physical))
         return MagicMock(name=f"rag-{wid}")
 
-    monkeypatch.setattr(server, "_build_workspace_rag", _fake_build)
+    monkeypatch.setattr(server.workspaces, "_build_workspace_rag", _fake_build)
     inst1 = await server.get_workspace_rag("alex")
     inst2 = await server.get_workspace_rag("alex")
     assert inst1 is inst2
@@ -1867,7 +1867,7 @@ async def test_get_workspace_rag_concurrent_builds_once(monkeypatch):
         await asyncio.sleep(0.01)
         return MagicMock()
 
-    monkeypatch.setattr(server, "_build_workspace_rag", _fake_build)
+    monkeypatch.setattr(server.workspaces, "_build_workspace_rag", _fake_build)
     results = await asyncio.gather(*[server.get_workspace_rag("alex") for _ in range(8)])
     assert calls == 1
     assert all(r is results[0] for r in results)
@@ -1878,7 +1878,7 @@ async def test_lookup_workspace_filters_deleted():
     pool = MagicMock()
     pool.fetchrow = AsyncMock(return_value=None)
     server._db_pool = pool
-    await server._lookup_workspace("career")
+    await server.workspaces._lookup_workspace("career")
     sql = str(pool.fetchrow.call_args)
     assert "deleted_at IS NULL" in sql
 
@@ -2192,8 +2192,8 @@ async def test_two_workspaces_get_distinct_instances(monkeypatch):
     async def _fake_build(wid, physical):
         return MagicMock(name=f"rag-{wid}")
 
-    monkeypatch.setattr(server, "_lookup_workspace", _fake_lookup)
-    monkeypatch.setattr(server, "_build_workspace_rag", _fake_build)
+    monkeypatch.setattr(server.workspaces, "_lookup_workspace", _fake_lookup)
+    monkeypatch.setattr(server.workspaces, "_build_workspace_rag", _fake_build)
     a = await server.get_workspace_rag("business")
     b = await server.get_workspace_rag("career")
     assert a is not b
@@ -2808,7 +2808,7 @@ async def test_llm_func_uses_query_cfg_by_default(monkeypatch):
     captured = []
     _install_fake_openai(monkeypatch, captured)
     _set_split_cfg(monkeypatch)
-    await server._llm_func("hi")
+    await server.llm._llm_func("hi")
     assert ("client", "oai-key", None) in captured
     assert ("create", "query-model") in captured
 
@@ -2820,7 +2820,7 @@ async def test_llm_func_uses_extract_cfg_in_extract_phase(monkeypatch):
     _set_split_cfg(monkeypatch)
     token = server.config._llm_phase.set("extract")
     try:
-        await server._llm_func("hi")
+        await server.llm._llm_func("hi")
     finally:
         server.config._llm_phase.reset(token)
     assert ("client", "or-key", "https://openrouter.ai/api/v1") in captured
@@ -2878,7 +2878,7 @@ async def test_embedding_func_routes_to_configured_endpoint(monkeypatch):
     monkeypatch.setattr(server.config, "EMBEDDING_BASE_URL", "http://local-embed:1234/v1")
     monkeypatch.setattr(server.config, "EMBEDDING_API_KEY", "embed-key")
     monkeypatch.setattr(server.config, "EMBEDDING_MODEL", "bge-m3")
-    out = await server._embedding_func(["a", "b"])
+    out = await server.llm._embedding_func(["a", "b"])
     assert captured["init"] == {"api_key": "embed-key", "base_url": "http://local-embed:1234/v1"}
     assert captured["emb"]["model"] == "bge-m3"
     assert isinstance(out, np.ndarray)  # LightRAG calls .size on the result
@@ -2890,7 +2890,7 @@ async def test_embedding_func_blank_base_url_is_openai(monkeypatch):
     _install_fake_openai_full(monkeypatch, captured)
     monkeypatch.setattr(server.config, "EMBEDDING_BASE_URL", None)
     monkeypatch.setattr(server.config, "EMBEDDING_API_KEY", "oai-key")
-    await server._embedding_func(["x"])
+    await server.llm._embedding_func(["x"])
     assert captured["init"] == {"api_key": "oai-key", "base_url": None}
 
 
@@ -2902,7 +2902,7 @@ async def test_vision_func_routes_and_keeps_openai_tokens(monkeypatch):
     monkeypatch.setattr(server.config, "VISION_API_KEY", "oai-key")
     monkeypatch.setattr(server.config, "VISION_MODEL", "gpt-5.4-mini")
     monkeypatch.setattr(server.config, "_VISION_IS_OPENAI", True)
-    await server._vision_func("describe", max_completion_tokens=50)
+    await server.llm._vision_func("describe", max_completion_tokens=50)
     assert captured["init"] == {"api_key": "oai-key", "base_url": None}
     assert captured["chat"]["model"] == "gpt-5.4-mini"
     assert captured["chat"].get("max_completion_tokens") == 50
@@ -2917,7 +2917,7 @@ async def test_vision_func_translates_tokens_for_non_openai(monkeypatch):
     monkeypatch.setattr(server.config, "VISION_API_KEY", "vlm-key")
     monkeypatch.setattr(server.config, "VISION_MODEL", "qwen2-vl")
     monkeypatch.setattr(server.config, "_VISION_IS_OPENAI", False)
-    await server._vision_func("describe", max_completion_tokens=50)
+    await server.llm._vision_func("describe", max_completion_tokens=50)
     assert captured["init"] == {"api_key": "vlm-key", "base_url": "http://local-vlm:1234/v1"}
     assert captured["chat"].get("max_tokens") == 50  # translated for non-OpenAI
     assert "max_completion_tokens" not in captured["chat"]

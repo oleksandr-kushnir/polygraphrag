@@ -81,7 +81,7 @@ async def main() -> int:
             "is_primary": workspace_id == "alex",
         }
 
-    server._lookup_workspace = _fake_lookup
+    server.workspaces._lookup_workspace = _fake_lookup
     server.get_workspace_rag = AsyncMock(return_value=rag_stub)
     server._db_pool = None
 

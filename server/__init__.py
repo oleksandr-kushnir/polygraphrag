@@ -21,8 +21,6 @@ from raganything import RAGAnything
 # server.config and patched there.
 from server.config import (
     API_TOKENS,
-    EMBEDDING_DIM,
-    EMBEDDING_MODEL,
     MAX_RETRIES,
     POSTGRES_DB,
     POSTGRES_HOST,
@@ -57,6 +55,12 @@ _registry_lock = asyncio.Lock()  # guards the dicts above
 # IngestionIncompleteError is re-exported for callers/tests that reference server.<name>.
 # --- DB helpers ---
 # Schema init + file/job metadata persistence live in server.db (they take the pool explicitly).
+# --- Workspace instance registry ---
+# Per-workspace RAGAnything instances are built/cached in server.workspaces (reading the shared
+# _rag_instances/_ws_locks/_registry_lock/_db_pool from this module). Endpoints use get_workspace_rag;
+# require_workspace resolves rows via the module (workspaces._lookup_workspace) so a test patch there
+# is seen by both that path and get_workspace_rag's own lookup.
+from server import workspaces  # noqa: E402
 from server.db import (  # noqa: E402
     _db_init,
     _db_insert_job,
@@ -64,92 +68,17 @@ from server.db import (  # noqa: E402
     _db_set_lightrag_key,
     _db_update_status,
 )
-from server.ingest import (  # noqa: E402
-    _build_metadata,
-    _join_path,
-    _process_file,
-)
-from server.llm import _embedding_func, _llm_func, _vision_func  # noqa: E402
-
-# --- Workspace instance registry ---
-
-
-async def _get_ws_lock(workspace_id: str) -> asyncio.Lock:
-    """Get (or lazily create) the per-workspace lock. Guards instance creation and
-    serialises inserts for that workspace."""
-    async with _registry_lock:
-        return _ws_locks.setdefault(workspace_id, asyncio.Lock())
-
-
-async def _lookup_workspace(workspace_id: str):
-    """Return the rag_workspaces row for an ACTIVE (not soft-deleted) workspace, else None."""
-    if _db_pool is None:
-        return None
-    return await _db_pool.fetchrow(
-        "SELECT id, name, description, lightrag_workspace, is_primary "
-        "FROM rag_workspaces WHERE id = $1 AND deleted_at IS NULL",
-        workspace_id,
-    )
-
-
-async def _build_workspace_rag(workspace_id: str, physical_workspace: str) -> RAGAnything:
-    """Construct + initialize a RAGAnything/LightRAG pair for one workspace.
-    `workspace_id` is the public id (names the on-disk working_dir); `physical_workspace`
-    is the LightRAG `workspace=` value that namespaces Postgres rows + the AGE graph."""
-    from lightrag import LightRAG
-    from lightrag.utils import EmbeddingFunc
-
-    working_dir = str(Path(WORKING_DIR) / workspace_id)
-    Path(working_dir).mkdir(parents=True, exist_ok=True)
-    embedding_func = EmbeddingFunc(
-        embedding_dim=EMBEDDING_DIM,
-        max_token_size=8192,
-        model_name=EMBEDDING_MODEL,
-        func=_embedding_func,
-    )
-    lightrag_instance = LightRAG(
-        working_dir=working_dir,
-        llm_model_func=_llm_func,
-        embedding_func=embedding_func,
-        kv_storage="PGKVStorage",
-        vector_storage="PGVectorStorage",
-        graph_storage="PGGraphStorage",
-        doc_status_storage="PGDocStatusStorage",
-        workspace=physical_workspace,
-    )
-    await lightrag_instance.initialize_storages()
-    return RAGAnything(
-        llm_model_func=_llm_func,
-        vision_model_func=_vision_func,
-        embedding_func=embedding_func,
-        lightrag=lightrag_instance,
-    )
-
-
-async def get_workspace_rag(workspace_id: str) -> RAGAnything:
-    """Return the cached RAGAnything for a workspace, building it lazily on first use.
-    Raises HTTPException(404) if the workspace is unknown or soft-deleted."""
-    cached = _rag_instances.get(workspace_id)
-    if cached is not None:
-        return cached
-    lock = await _get_ws_lock(workspace_id)
-    async with lock:
-        cached = _rag_instances.get(workspace_id)
-        if cached is not None:
-            return cached
-        row = await _lookup_workspace(workspace_id)
-        if row is None:
-            raise HTTPException(404, f"Workspace {workspace_id!r} not found")
-        instance = await _build_workspace_rag(workspace_id, row["lightrag_workspace"])
-        _rag_instances[workspace_id] = instance
-        return instance
-
 
 # --- References (real-path resolution) ---
 # Defined in server.references; re-exported for the query/graph endpoints and upload_batch.
 # --- Graph visualisation ---
 # Rendering lives in server.graph; the graph.html endpoint calls _build_graph_html.
 from server.graph import _build_graph_html  # noqa: E402
+from server.ingest import (  # noqa: E402
+    _build_metadata,
+    _join_path,
+    _process_file,
+)
 from server.references import (  # noqa: E402
     _build_references,
     _clean_needles,
@@ -159,6 +88,7 @@ from server.references import (  # noqa: E402
     _rewrite_answer_refs,
     _safe_ref_name,
 )
+from server.workspaces import _get_ws_lock, get_workspace_rag  # noqa: E402
 
 
 def _query_param(QueryParam, *, mode, include_references=None, top_k=None, chunk_top_k=None):
@@ -712,7 +642,7 @@ async def require_workspace(workspace_id: str) -> dict:
     workspace). 404 if the slug is malformed, unknown, or soft-deleted."""
     if not _is_valid_slug(workspace_id):
         raise HTTPException(404, f"Workspace {workspace_id!r} not found")
-    row = await _lookup_workspace(workspace_id)
+    row = await workspaces._lookup_workspace(workspace_id)
     if row is None:
         raise HTTPException(404, f"Workspace {workspace_id!r} not found")
     return row
