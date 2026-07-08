@@ -1898,14 +1898,14 @@ def _registry_pool(existing=None, rows=None):
 
 @pytest.mark.parametrize("slug", ["business", "ai_base_1", "career", "a", "a_b_c", "x" * 48])
 def test_valid_slugs(slug):
-    assert server._is_valid_slug(slug) is True
+    assert server.deps._is_valid_slug(slug) is True
 
 
 @pytest.mark.parametrize(
     "slug", ["Business", "1abc", "a b", "", "x" * 49, "a-b", "ab!", "_ab", "café"]
 )
 def test_invalid_slugs(slug):
-    assert server._is_valid_slug(slug) is False
+    assert server.deps._is_valid_slug(slug) is False
 
 
 @pytest.mark.asyncio

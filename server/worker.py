@@ -14,6 +14,7 @@ import server
 from server import config
 from server.ingest import _build_metadata
 from server.references import _safe_ref_name
+from server.workspaces import _get_ws_lock
 
 
 def _job_path(workspace_id: str, job_id: str, filename: str) -> Path:
@@ -88,7 +89,7 @@ async def _process_job(
         await server._db_update_status(server._db_pool, job_id, "processing", job["attempts"], None)
     try:
         rag_instance = await server.get_workspace_rag(workspace_id)
-        lock = await server._get_ws_lock(workspace_id)
+        lock = await _get_ws_lock(workspace_id)
         async with lock:
             result = await server._process_file(
                 dest, rag_instance, description_text=description_text, file_path=file_path
