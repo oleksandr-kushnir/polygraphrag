@@ -22,8 +22,6 @@ from raganything import RAGAnything
 from server.config import (
     _VISION_IS_OPENAI,
     API_TOKENS,
-    EMBEDDING_API_KEY,
-    EMBEDDING_BASE_URL,
     EMBEDDING_DIM,
     EMBEDDING_MODEL,
     LLM_BASE_URL,
@@ -49,7 +47,6 @@ from server.config import (
     WHISPER_BASE_URL,
     WHISPER_MODEL,
     WORKING_DIR,
-    _active_llm_cfg,
     _llm_call_kwargs,
     _llm_phase,
 )
@@ -74,72 +71,9 @@ _registry_lock = asyncio.Lock()  # guards the dicts above
 
 
 # --- LLM / embedding shims ---
-
-
-async def _llm_func(prompt, system_prompt=None, history_messages=[], **kwargs):
-    import openai
-
-    model, base_url, api_key, is_openai = _active_llm_cfg()
-    logging.debug("llm call: phase=%s model=%s", _llm_phase.get(), model)
-    client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
-    messages = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.extend(history_messages)
-    messages.append({"role": "user", "content": prompt})
-    resp = await client.chat.completions.create(
-        model=model,
-        messages=messages,
-        **_llm_call_kwargs(kwargs, is_openai),
-    )
-    return resp.choices[0].message.content
-
-
-async def _vision_func(
-    prompt,
-    system_prompt=None,
-    history_messages=[],
-    image_data=None,
-    messages=None,
-    **kwargs,
-):
-    import openai
-
-    client = openai.AsyncOpenAI(api_key=VISION_API_KEY, base_url=VISION_BASE_URL)
-    if messages is not None:
-        final_messages = messages
-    elif image_data is not None:
-        content = [
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}},
-            {"type": "text", "text": prompt},
-        ]
-        final_messages = []
-        if system_prompt:
-            final_messages.append({"role": "system", "content": system_prompt})
-        final_messages.extend(history_messages)
-        final_messages.append({"role": "user", "content": content})
-    else:
-        final_messages = []
-        if system_prompt:
-            final_messages.append({"role": "system", "content": system_prompt})
-        final_messages.extend(history_messages)
-        final_messages.append({"role": "user", "content": prompt})
-    resp = await client.chat.completions.create(
-        model=VISION_MODEL,
-        messages=final_messages,
-        **_llm_call_kwargs(kwargs, is_openai=_VISION_IS_OPENAI),
-    )
-    return resp.choices[0].message.content
-
-
-async def _embedding_func(texts: list[str]):
-    import numpy as np
-    import openai
-
-    client = openai.AsyncOpenAI(api_key=EMBEDDING_API_KEY, base_url=EMBEDDING_BASE_URL)
-    resp = await client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
-    return np.array([d.embedding for d in resp.data])
-
+# Defined in server.llm (they read endpoint config live from server.config); re-exported here
+# because _build_workspace_rag wires them into LightRAG / RAG-Anything.
+from server.llm import _embedding_func, _llm_func, _vision_func  # noqa: E402
 
 # --- Document processing ---
 

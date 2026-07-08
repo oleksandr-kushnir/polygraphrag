@@ -2722,11 +2722,11 @@ def test_active_llm_cfg_switches_on_phase(monkeypatch):
     monkeypatch.setattr(server.config, "QUERY_LLM_IS_OPENAI", True)
 
     # Default (query) phase
-    assert server._active_llm_cfg() == ("query-model", None, "oai-key", True)
+    assert server.config._active_llm_cfg() == ("query-model", None, "oai-key", True)
     # Extract phase
     token = server._llm_phase.set("extract")
     try:
-        assert server._active_llm_cfg() == (
+        assert server.config._active_llm_cfg() == (
             "extract-model",
             "https://openrouter.ai/api/v1",
             "or-key",
@@ -2875,9 +2875,9 @@ async def test_embedding_func_routes_to_configured_endpoint(monkeypatch):
 
     captured = {}
     _install_fake_openai_full(monkeypatch, captured)
-    monkeypatch.setattr(server, "EMBEDDING_BASE_URL", "http://local-embed:1234/v1")
-    monkeypatch.setattr(server, "EMBEDDING_API_KEY", "embed-key")
-    monkeypatch.setattr(server, "EMBEDDING_MODEL", "bge-m3")
+    monkeypatch.setattr(server.config, "EMBEDDING_BASE_URL", "http://local-embed:1234/v1")
+    monkeypatch.setattr(server.config, "EMBEDDING_API_KEY", "embed-key")
+    monkeypatch.setattr(server.config, "EMBEDDING_MODEL", "bge-m3")
     out = await server._embedding_func(["a", "b"])
     assert captured["init"] == {"api_key": "embed-key", "base_url": "http://local-embed:1234/v1"}
     assert captured["emb"]["model"] == "bge-m3"
@@ -2888,8 +2888,8 @@ async def test_embedding_func_routes_to_configured_endpoint(monkeypatch):
 async def test_embedding_func_blank_base_url_is_openai(monkeypatch):
     captured = {}
     _install_fake_openai_full(monkeypatch, captured)
-    monkeypatch.setattr(server, "EMBEDDING_BASE_URL", None)
-    monkeypatch.setattr(server, "EMBEDDING_API_KEY", "oai-key")
+    monkeypatch.setattr(server.config, "EMBEDDING_BASE_URL", None)
+    monkeypatch.setattr(server.config, "EMBEDDING_API_KEY", "oai-key")
     await server._embedding_func(["x"])
     assert captured["init"] == {"api_key": "oai-key", "base_url": None}
 
@@ -2898,10 +2898,10 @@ async def test_embedding_func_blank_base_url_is_openai(monkeypatch):
 async def test_vision_func_routes_and_keeps_openai_tokens(monkeypatch):
     captured = {}
     _install_fake_openai_full(monkeypatch, captured)
-    monkeypatch.setattr(server, "VISION_BASE_URL", None)
-    monkeypatch.setattr(server, "VISION_API_KEY", "oai-key")
-    monkeypatch.setattr(server, "VISION_MODEL", "gpt-5.4-mini")
-    monkeypatch.setattr(server, "_VISION_IS_OPENAI", True)
+    monkeypatch.setattr(server.config, "VISION_BASE_URL", None)
+    monkeypatch.setattr(server.config, "VISION_API_KEY", "oai-key")
+    monkeypatch.setattr(server.config, "VISION_MODEL", "gpt-5.4-mini")
+    monkeypatch.setattr(server.config, "_VISION_IS_OPENAI", True)
     await server._vision_func("describe", max_completion_tokens=50)
     assert captured["init"] == {"api_key": "oai-key", "base_url": None}
     assert captured["chat"]["model"] == "gpt-5.4-mini"
@@ -2913,10 +2913,10 @@ async def test_vision_func_routes_and_keeps_openai_tokens(monkeypatch):
 async def test_vision_func_translates_tokens_for_non_openai(monkeypatch):
     captured = {}
     _install_fake_openai_full(monkeypatch, captured)
-    monkeypatch.setattr(server, "VISION_BASE_URL", "http://local-vlm:1234/v1")
-    monkeypatch.setattr(server, "VISION_API_KEY", "vlm-key")
-    monkeypatch.setattr(server, "VISION_MODEL", "qwen2-vl")
-    monkeypatch.setattr(server, "_VISION_IS_OPENAI", False)
+    monkeypatch.setattr(server.config, "VISION_BASE_URL", "http://local-vlm:1234/v1")
+    monkeypatch.setattr(server.config, "VISION_API_KEY", "vlm-key")
+    monkeypatch.setattr(server.config, "VISION_MODEL", "qwen2-vl")
+    monkeypatch.setattr(server.config, "_VISION_IS_OPENAI", False)
     await server._vision_func("describe", max_completion_tokens=50)
     assert captured["init"] == {"api_key": "vlm-key", "base_url": "http://local-vlm:1234/v1"}
     assert captured["chat"].get("max_tokens") == 50  # translated for non-OpenAI
