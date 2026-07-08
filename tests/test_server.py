@@ -3260,13 +3260,13 @@ def test_safe_ref_name_strips_directories():
 
 
 def test_strip_job_prefix():
-    assert server._strip_job_prefix("20ed9a7c_Tag_1.pdf") == "Tag_1.pdf"
-    assert server._strip_job_prefix("beefcafe_notes.txt") == "notes.txt"
+    assert server.references._strip_job_prefix("20ed9a7c_Tag_1.pdf") == "Tag_1.pdf"
+    assert server.references._strip_job_prefix("beefcafe_notes.txt") == "notes.txt"
     assert (
-        server._strip_job_prefix("no_prefix_here.txt") == "no_prefix_here.txt"
+        server.references._strip_job_prefix("no_prefix_here.txt") == "no_prefix_here.txt"
     )  # 'no' isn't hex-run
-    assert server._strip_job_prefix("plain.txt") == "plain.txt"
-    assert server._strip_job_prefix("") == ""
+    assert server.references._strip_job_prefix("plain.txt") == "plain.txt"
+    assert server.references._strip_job_prefix("") == ""
 
 
 def test_rewrite_answer_refs_resolved_and_unresolved():
