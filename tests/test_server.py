@@ -183,7 +183,7 @@ def _fake_upload(filename: str, content: bytes = b"hello") -> dict:
 async def test_routes_pdf_to_vision(tmp_path):
     path = tmp_path / "doc.pdf"
     path.write_bytes(b"%PDF-1.4 test")
-    with patch.object(server, "_extract_with_vision", new=AsyncMock(return_value="text")) as m:
+    with patch.object(server.ingest, "_extract_with_vision", new=AsyncMock(return_value="text")) as m:
         await server._process_file(path, rag_stub)
     m.assert_awaited_once_with(path)
 
@@ -193,7 +193,7 @@ async def test_routes_pdf_to_vision(tmp_path):
 async def test_routes_images_to_vision(tmp_path, ext):
     path = tmp_path / f"img{ext}"
     path.write_bytes(b"\x89PNG")
-    with patch.object(server, "_extract_with_vision", new=AsyncMock(return_value="text")) as m:
+    with patch.object(server.ingest, "_extract_with_vision", new=AsyncMock(return_value="text")) as m:
         await server._process_file(path, rag_stub)
     m.assert_awaited_once()
 
@@ -203,7 +203,7 @@ async def test_routes_images_to_vision(tmp_path, ext):
 async def test_routes_audio_to_whisper(tmp_path, ext):
     path = tmp_path / f"audio{ext}"
     path.write_bytes(b"RIFF")
-    with patch.object(server, "_transcribe_audio", new=AsyncMock(return_value="transcript")) as m:
+    with patch.object(server.ingest, "_transcribe_audio", new=AsyncMock(return_value="transcript")) as m:
         await server._process_file(path, rag_stub)
     m.assert_awaited_once_with(path)
 
@@ -217,8 +217,8 @@ async def test_routes_office_converts_then_vision(tmp_path, ext):
     fake_pdf = pdf_dir / "office.pdf"
     fake_pdf.write_bytes(b"%PDF")
     with (
-        patch.object(server, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)),
-        patch.object(server, "_extract_with_vision", new=AsyncMock(return_value="text")) as mv,
+        patch.object(server.ingest, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)),
+        patch.object(server.ingest, "_extract_with_vision", new=AsyncMock(return_value="text")) as mv,
     ):
         await server._process_file(path, rag_stub)
     mv.assert_awaited_once_with(fake_pdf)
@@ -232,8 +232,8 @@ async def test_office_temp_pdf_deleted_on_success(tmp_path):
     fake_pdf = pdf_dir / "slides.pdf"
     fake_pdf.write_bytes(b"%PDF")
     with (
-        patch.object(server, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)),
-        patch.object(server, "_extract_with_vision", new=AsyncMock(return_value="text")),
+        patch.object(server.ingest, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)),
+        patch.object(server.ingest, "_extract_with_vision", new=AsyncMock(return_value="text")),
     ):
         await server._process_file(path, rag_stub)
     assert not fake_pdf.exists()
@@ -248,9 +248,9 @@ async def test_office_temp_pdf_deleted_on_vision_error(tmp_path):
     fake_pdf = pdf_dir / "slides.pdf"
     fake_pdf.write_bytes(b"%PDF")
     with (
-        patch.object(server, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)),
+        patch.object(server.ingest, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)),
         patch.object(
-            server, "_extract_with_vision", new=AsyncMock(side_effect=RuntimeError("vision fail"))
+            server.ingest, "_extract_with_vision", new=AsyncMock(side_effect=RuntimeError("vision fail"))
         ),
     ):
         with pytest.raises(RuntimeError):
@@ -275,8 +275,8 @@ async def test_xlsx_under_10mb_proceeds(tmp_path):
     fake_pdf = pdf_dir / "small.pdf"
     fake_pdf.write_bytes(b"%PDF")
     with (
-        patch.object(server, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)),
-        patch.object(server, "_extract_with_vision", new=AsyncMock(return_value="text")) as mv,
+        patch.object(server.ingest, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)),
+        patch.object(server.ingest, "_extract_with_vision", new=AsyncMock(return_value="text")) as mv,
     ):
         await server._process_file(path, rag_stub)
     mv.assert_awaited_once()
@@ -290,8 +290,8 @@ async def test_xlsx_size_limit_only_applies_to_xlsx(tmp_path):
     fake_pdf = pdf_dir / "big.pdf"
     fake_pdf.write_bytes(b"%PDF")
     with (
-        patch.object(server, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)),
-        patch.object(server, "_extract_with_vision", new=AsyncMock(return_value="text")) as mv,
+        patch.object(server.ingest, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)),
+        patch.object(server.ingest, "_extract_with_vision", new=AsyncMock(return_value="text")) as mv,
     ):
         await server._process_file(path, rag_stub)
     mv.assert_awaited_once()
@@ -2227,7 +2227,7 @@ async def test_ingestion_raises_when_doc_failed(tmp_path):
     path = tmp_path / "bad.txt"
     path.write_text("hello world")
     rag_stub.lightrag.aget_docs_by_ids.return_value = _docs(status="failed")
-    with pytest.raises(server.IngestionIncompleteError, match="doc_status=failed"):
+    with pytest.raises(server.ingest.IngestionIncompleteError, match="doc_status=failed"):
         await server._process_file(path, rag_stub)
     rag_stub.lightrag.adelete_by_doc_id.assert_awaited_once()
     assert rag_stub.lightrag.adelete_by_doc_id.call_args.kwargs.get("delete_llm_cache") is True
@@ -2239,7 +2239,7 @@ async def test_ingestion_raises_when_no_doc_status(tmp_path):
     path = tmp_path / "missing.txt"
     path.write_text("hello world")
     rag_stub.lightrag.aget_docs_by_ids.return_value = {}  # no row for the computed doc id
-    with pytest.raises(server.IngestionIncompleteError, match="no_doc_status"):
+    with pytest.raises(server.ingest.IngestionIncompleteError, match="no_doc_status"):
         await server._process_file(path, rag_stub)
     rag_stub.lightrag.adelete_by_doc_id.assert_awaited_once()
 
@@ -2253,7 +2253,7 @@ async def test_empty_graph_guard_fails_when_no_entities(tmp_path):
     path.write_text("x" * 300)
     rag_stub.lightrag.aget_docs_by_ids.return_value = _docs(status="processed", content_length=None)
     try:
-        with pytest.raises(server.IngestionIncompleteError, match="empty_graph"):
+        with pytest.raises(server.ingest.IngestionIncompleteError, match="empty_graph"):
             await server._process_file(path, rag_stub)
     finally:
         _mock_pool.fetchrow.return_value = None
@@ -2277,7 +2277,7 @@ async def test_empty_graph_guard_passes_when_entities_present(tmp_path):
 @pytest.mark.asyncio
 async def test_empty_graph_guard_disabled(tmp_path, monkeypatch):
     """With the guard off, zero entities is allowed (corpora that yield no entities)."""
-    monkeypatch.setattr(server, "RAG_REQUIRE_GRAPH_EXTRACTION", False)
+    monkeypatch.setattr(server.config, "RAG_REQUIRE_GRAPH_EXTRACTION", False)
     server._db_pool = _mock_pool
     _mock_pool.fetchrow.return_value = {"count": 0}
     path = tmp_path / "long.txt"
@@ -2580,7 +2580,7 @@ def _restore_llm_flag():
 
 def test_llm_call_kwargs_openai_path_keeps_max_completion_tokens(_restore_llm_flag):
     server.config._LLM_IS_OPENAI = True
-    out = server._llm_call_kwargs(
+    out = server.config._llm_call_kwargs(
         {"temperature": 0.2, "max_completion_tokens": 16000, "max_tokens": 999, "stream": True}
     )
     # OpenAI path: keep temperature + max_completion_tokens, drop everything else (incl. max_tokens).
@@ -2589,7 +2589,7 @@ def test_llm_call_kwargs_openai_path_keeps_max_completion_tokens(_restore_llm_fl
 
 def test_llm_call_kwargs_thirdparty_translates_to_max_tokens(_restore_llm_flag):
     server.config._LLM_IS_OPENAI = False
-    out = server._llm_call_kwargs(
+    out = server.config._llm_call_kwargs(
         {"temperature": 0.2, "max_completion_tokens": 16000, "stream": True}
     )
     # Third-party (OpenRouter/DeepSeek) path: translate max_completion_tokens -> max_tokens.
@@ -2598,14 +2598,14 @@ def test_llm_call_kwargs_thirdparty_translates_to_max_tokens(_restore_llm_flag):
 
 def test_llm_call_kwargs_thirdparty_prefers_explicit_max_tokens(_restore_llm_flag):
     server.config._LLM_IS_OPENAI = False
-    out = server._llm_call_kwargs({"max_tokens": 8000, "max_completion_tokens": 16000})
+    out = server.config._llm_call_kwargs({"max_tokens": 8000, "max_completion_tokens": 16000})
     # An explicit max_tokens is honoured as-is (no translation/overwrite).
     assert out == {"max_tokens": 8000}
 
 
 def test_llm_call_kwargs_drops_unknown_kwargs(_restore_llm_flag):
     server.config._LLM_IS_OPENAI = False
-    out = server._llm_call_kwargs({"foo": "bar", "n": 3})
+    out = server.config._llm_call_kwargs({"foo": "bar", "n": 3})
     assert out == {}
 
 
@@ -2616,7 +2616,7 @@ def test_llm_call_kwargs_drops_unknown_kwargs(_restore_llm_flag):
 
 def test_llm_phase_defaults_to_query():
     # Outside an ingest, the active phase is the hot query path.
-    assert server._llm_phase.get() == "query"
+    assert server.config._llm_phase.get() == "query"
 
 
 def _reimport_server_with_env(monkeypatch, env: dict):
@@ -2724,7 +2724,7 @@ def test_active_llm_cfg_switches_on_phase(monkeypatch):
     # Default (query) phase
     assert server.config._active_llm_cfg() == ("query-model", None, "oai-key", True)
     # Extract phase
-    token = server._llm_phase.set("extract")
+    token = server.config._llm_phase.set("extract")
     try:
         assert server.config._active_llm_cfg() == (
             "extract-model",
@@ -2733,7 +2733,7 @@ def test_active_llm_cfg_switches_on_phase(monkeypatch):
             False,
         )
     finally:
-        server._llm_phase.reset(token)
+        server.config._llm_phase.reset(token)
 
 
 @pytest.mark.asyncio
@@ -2743,7 +2743,7 @@ async def test_process_file_runs_under_extract_phase(tmp_path):
     seen = {}
 
     async def _capture(content, ids=None, file_paths=None):
-        seen["phase"] = server._llm_phase.get()
+        seen["phase"] = server.config._llm_phase.get()
 
     rag_stub.lightrag.ainsert.side_effect = _capture
     try:
@@ -2752,12 +2752,12 @@ async def test_process_file_runs_under_extract_phase(tmp_path):
         rag_stub.lightrag.ainsert.side_effect = None
     assert seen["phase"] == "extract"
     # Phase is restored to the default after ingest completes.
-    assert server._llm_phase.get() == "query"
+    assert server.config._llm_phase.get() == "query"
 
 
 @pytest.mark.asyncio
 async def test_process_file_logs_extraction_model(tmp_path, monkeypatch, caplog):
-    monkeypatch.setattr(server, "LLM_MODEL", "extract-model")
+    monkeypatch.setattr(server.config, "LLM_MODEL", "extract-model")
     path = tmp_path / "note.txt"
     path.write_text("hello world", encoding="utf-8")
 
@@ -2818,11 +2818,11 @@ async def test_llm_func_uses_extract_cfg_in_extract_phase(monkeypatch):
     captured = []
     _install_fake_openai(monkeypatch, captured)
     _set_split_cfg(monkeypatch)
-    token = server._llm_phase.set("extract")
+    token = server.config._llm_phase.set("extract")
     try:
         await server._llm_func("hi")
     finally:
-        server._llm_phase.reset(token)
+        server.config._llm_phase.reset(token)
     assert ("client", "or-key", "https://openrouter.ai/api/v1") in captured
     assert ("create", "extract-model") in captured
 
@@ -2927,13 +2927,13 @@ async def test_vision_func_translates_tokens_for_non_openai(monkeypatch):
 async def test_extract_with_vision_routes_to_configured_endpoint(tmp_path, monkeypatch):
     captured = {}
     _install_fake_openai_full(monkeypatch, captured)
-    monkeypatch.setattr(server, "VISION_BASE_URL", "http://local-vlm:1234/v1")
-    monkeypatch.setattr(server, "VISION_API_KEY", "vlm-key")
-    monkeypatch.setattr(server, "VISION_MODEL", "qwen2-vl")
-    monkeypatch.setattr(server, "_VISION_IS_OPENAI", False)
+    monkeypatch.setattr(server.config, "VISION_BASE_URL", "http://local-vlm:1234/v1")
+    monkeypatch.setattr(server.config, "VISION_API_KEY", "vlm-key")
+    monkeypatch.setattr(server.config, "VISION_MODEL", "qwen2-vl")
+    monkeypatch.setattr(server.config, "_VISION_IS_OPENAI", False)
     pdf = tmp_path / "doc.pdf"
     pdf.write_bytes(b"%PDF-1.4 test")
-    await server._extract_with_vision(pdf)
+    await server.ingest._extract_with_vision(pdf)
     assert captured["init"] == {"api_key": "vlm-key", "base_url": "http://local-vlm:1234/v1"}
     assert captured["chat"]["model"] == "qwen2-vl"
     assert captured["chat"].get("max_tokens") == 16000  # translated from the hardcoded cap
@@ -2943,12 +2943,12 @@ async def test_extract_with_vision_routes_to_configured_endpoint(tmp_path, monke
 async def test_transcribe_audio_routes_and_uses_configured_model(tmp_path, monkeypatch):
     captured = {}
     _install_fake_openai_full(monkeypatch, captured)
-    monkeypatch.setattr(server, "WHISPER_BASE_URL", "http://local-whisper:9000/v1")
-    monkeypatch.setattr(server, "WHISPER_API_KEY", "whisper-key")
-    monkeypatch.setattr(server, "WHISPER_MODEL", "faster-whisper-large-v3")
+    monkeypatch.setattr(server.config, "WHISPER_BASE_URL", "http://local-whisper:9000/v1")
+    monkeypatch.setattr(server.config, "WHISPER_API_KEY", "whisper-key")
+    monkeypatch.setattr(server.config, "WHISPER_MODEL", "faster-whisper-large-v3")
     audio = tmp_path / "clip.mp3"
     audio.write_bytes(b"RIFF....")
-    out = await server._transcribe_audio(audio)
+    out = await server.ingest._transcribe_audio(audio)
     assert captured["init"] == {
         "api_key": "whisper-key",
         "base_url": "http://local-whisper:9000/v1",
