@@ -12,6 +12,8 @@ from pathlib import Path
 
 import server
 from server import config
+from server.ingest import _build_metadata
+from server.references import _safe_ref_name
 
 
 def _job_path(workspace_id: str, job_id: str, filename: str) -> Path:
@@ -23,7 +25,7 @@ def _job_path(workspace_id: str, job_id: str, filename: str) -> Path:
     """
     d = Path(server.WORKING_DIR) / workspace_id
     d.mkdir(parents=True, exist_ok=True)
-    return d / f"{job_id}_{server._safe_ref_name(filename)}"
+    return d / f"{job_id}_{_safe_ref_name(filename)}"
 
 
 async def _db_reload_jobs(pool) -> None:
@@ -53,13 +55,15 @@ async def _db_reload_jobs(pool) -> None:
         server._batches.setdefault(row["batch_id"], []).append(record)
         dest = Path(server.WORKING_DIR) / physical / f"{job_id}_{row['file']}"
         if pub_row is not None and dest.exists():
-            description_text = server._build_metadata(
+            description_text = _build_metadata(
                 row["description"] or "", row["source_path"] or "", row["last_modified_time"] or ""
             )
             # Re-hand LightRAG the same identity (lightrag_input), NOT the real display file_path.
-            lightrag_input = f"{job_id}_{server._safe_ref_name(row['file'])}"
+            lightrag_input = f"{job_id}_{_safe_ref_name(row['file'])}"
             await server._db_update_status(pool, job_id, "pending", row["attempts"], None)
-            await server._job_queue.put((pub_row["id"], job_id, dest, description_text, lightrag_input))
+            await server._job_queue.put(
+                (pub_row["id"], job_id, dest, description_text, lightrag_input)
+            )
         else:
             record["status"] = "failed"
             record["error"] = "File missing after restart"

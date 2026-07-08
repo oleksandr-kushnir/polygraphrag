@@ -70,6 +70,8 @@ async def _embedding_func(texts: list[str]):
     import numpy as np
     import openai
 
-    client = openai.AsyncOpenAI(api_key=config.EMBEDDING_API_KEY, base_url=config.EMBEDDING_BASE_URL)
+    client = openai.AsyncOpenAI(
+        api_key=config.EMBEDDING_API_KEY, base_url=config.EMBEDDING_BASE_URL
+    )
     resp = await client.embeddings.create(model=config.EMBEDDING_MODEL, input=texts)
     return np.array([d.embedding for d in resp.data])

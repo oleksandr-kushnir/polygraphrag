@@ -65,7 +65,9 @@ async def _extract_with_vision(path: Path) -> str:
         messages=[
             {"role": "user", "content": [{"type": "text", "text": _EXTRACTION_PROMPT}, file_part]}
         ],
-        **config._llm_call_kwargs({"max_completion_tokens": 16000}, is_openai=config._VISION_IS_OPENAI),
+        **config._llm_call_kwargs(
+            {"max_completion_tokens": 16000}, is_openai=config._VISION_IS_OPENAI
+        ),
     )
     return resp.choices[0].message.content
 

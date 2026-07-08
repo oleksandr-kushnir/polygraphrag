@@ -563,19 +563,19 @@ async def test_error_field_reflects_last_attempt(tmp_path):
 
 
 def test_build_metadata_returns_description_only():
-    result = server._build_metadata("My desc", "/path/to/file", "2026-01-01")
+    result = server.ingest._build_metadata("My desc", "/path/to/file", "2026-01-01")
     assert result == "My desc"
 
 
 def test_build_metadata_ignores_source_and_timestamp():
     # source_path and last_modified are persisted in rag_file_metadata but
     # must not be injected into chunk text.
-    result = server._build_metadata("", "/path", "2026-01-01")
+    result = server.ingest._build_metadata("", "/path", "2026-01-01")
     assert result == ""
 
 
 def test_build_metadata_empty_when_no_description():
-    assert server._build_metadata("", "", "") == ""
+    assert server.ingest._build_metadata("", "", "") == ""
 
 
 def test_batch_summary_counts():
@@ -2354,8 +2354,8 @@ async def test_new_registry_routes_present(client):
 
 
 def test_join_path():
-    assert server._join_path("/data/corpus", "sub/dir/f.pdf") == "/data/corpus/sub/dir/f.pdf"
-    assert server._join_path("/data/corpus/", "/sub/f.pdf") == "/data/corpus/sub/f.pdf"
+    assert server.ingest._join_path("/data/corpus", "sub/dir/f.pdf") == "/data/corpus/sub/dir/f.pdf"
+    assert server.ingest._join_path("/data/corpus/", "/sub/f.pdf") == "/data/corpus/sub/f.pdf"
 
 
 @pytest.mark.asyncio
@@ -3253,10 +3253,10 @@ async def test_files_endpoint_hides_lightrag_key(client):
 
 
 def test_safe_ref_name_strips_directories():
-    assert server._safe_ref_name("a/b/c.txt") == "c.txt"
-    assert server._safe_ref_name("..\\x\\y.pdf") == "y.pdf"
-    assert server._safe_ref_name("plain.txt") == "plain.txt"
-    assert server._safe_ref_name(None) == ""
+    assert server.references._safe_ref_name("a/b/c.txt") == "c.txt"
+    assert server.references._safe_ref_name("..\\x\\y.pdf") == "y.pdf"
+    assert server.references._safe_ref_name("plain.txt") == "plain.txt"
+    assert server.references._safe_ref_name(None) == ""
 
 
 def test_strip_job_prefix():
@@ -3298,11 +3298,11 @@ def test_job_path_sanitizes_separators_no_traversal(tmp_path, monkeypatch):
     # A filename carrying a path separator must not create subdirs or escape the
     # workspace dir — the on-disk name is basenamed just like the LightRAG key.
     monkeypatch.setattr(server, "WORKING_DIR", str(tmp_path))
-    p = server._job_path("test", "deadbeef", "nav/watchtower[spec].txt")
+    p = server.worker._job_path("test", "deadbeef", "nav/watchtower[spec].txt")
     assert p.parent == tmp_path / "test"  # stays inside the workspace dir
     assert p.name == "deadbeef_watchtower[spec].txt"  # separator stripped, job_id intact
     # a traversal attempt is neutralised to a plain basename under the workspace dir
-    ev = server._job_path("test", "deadbeef", "../../etc/passwd")
+    ev = server.worker._job_path("test", "deadbeef", "../../etc/passwd")
     assert ev.parent == tmp_path / "test"
     assert ev.name == "deadbeef_passwd"
 
