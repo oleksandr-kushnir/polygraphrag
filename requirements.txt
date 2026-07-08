@@ -21,9 +21,8 @@ fastapi
 uvicorn[standard]
 python-multipart
 
-# Postgres (pgvector + Apache AGE) storage backend
+# Postgres (pgvector + Apache AGE) storage backend — asyncpg only
 asyncpg
-psycopg2-binary
 
 # Interactive knowledge-graph visualization (/workspace/{id}/graph.html)
 pyvis

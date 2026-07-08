@@ -45,22 +45,6 @@ file (or the per-package license texts) with it.
   ("Powered by MinerU"). **If you fork or rebrand this service, keep a visible
   "powered by MinerU" attribution.**
 
-### psycopg2-binary — LGPL (weak copyleft)
-
-- **Package:** `psycopg2-binary`
-- **License:** LGPL-3.0-or-later, with a linking/loader exception.
-- **Obligation when bundled (e.g. in the Docker image):** include the LGPL
-  license text, note that psycopg2 is used and where its source is available
-  (<https://github.com/psycopg/psycopg2> / PyPI), and do not prevent recipients
-  from replacing it with a modified version. Using it unmodified as a library —
-  as PolyGraphRAG does — is fully permitted under the exception; no PolyGraphRAG
-  source needs to be released.
-- **Note:** `psycopg2-binary` is currently listed in `requirements.txt` but is
-  **not imported by PolyGraphRAG's code** (the Postgres access path uses
-  `asyncpg`, Apache-2.0). If it is confirmed unnecessary for the LightRAG /
-  Apache AGE runtime, removing it eliminates the only copyleft dependency and
-  this obligation entirely.
-
 ---
 
 ## Permissive dependencies (attribution only when redistributed)
