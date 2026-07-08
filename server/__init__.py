@@ -2,7 +2,6 @@ import asyncio
 import base64
 import hashlib
 import json
-import logging
 import re
 import secrets
 import uuid
@@ -59,7 +58,6 @@ _registry_lock = asyncio.Lock()  # guards the dicts above
 # _rag_instances/_ws_locks/_registry_lock/_db_pool from this module). Endpoints use get_workspace_rag;
 # require_workspace resolves rows via the module (workspaces._lookup_workspace) so a test patch there
 # is seen by both that path and get_workspace_rag's own lookup.
-from server import workspaces  # noqa: E402
 from server.db import (  # noqa: E402
     _db_init,
     _db_insert_job,
@@ -236,28 +234,13 @@ async def _require_auth(request: Request, call_next):
     return await call_next(request)
 
 
-# --- Helpers ---
-
-
-def _batch_summary(entries: list[dict]) -> dict:
-    counts: dict[str, int] = {}
-    for e in entries:
-        counts[e["status"]] = counts.get(e["status"], 0) + 1
-    counts["total"] = len(entries)
-    return counts
-
-
-def _batch_response(batch_id: str, entries: list[dict]) -> dict:
-    return {"batch_id": batch_id, "summary": _batch_summary(entries), "jobs": entries}
-
-
-def _internal_error(exc: Exception, context: str) -> HTTPException:
-    """Log the real error server-side (with traceback) and return a client-safe generic 500.
-    Keeps internal exception text — which can reveal implementation/query details — out of the
-    HTTP response. Use as `raise _internal_error(exc, "query")`."""
-    logging.exception("%s failed: %s", context, exc)
-    return HTTPException(500, "Internal server error")
-
+# --- Shared endpoint deps/helpers (server.deps) ---
+from server.deps import (  # noqa: E402
+    _batch_response,
+    _internal_error,
+    _is_valid_slug,
+    require_workspace,
+)
 
 # --- API ---
 # Request models live in server.schemas. Imported by ABSOLUTE name (not `.schemas`) so the
@@ -281,13 +264,6 @@ async def health():
 
 
 # --- Workspace registry API ---
-
-_SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{0,47}$")
-
-
-def _is_valid_slug(slug: str) -> bool:
-    return bool(_SLUG_RE.match(slug or ""))
-
 
 def _workspace_public(row) -> dict:
     ca = row["created_at"]
@@ -539,18 +515,6 @@ async def workspace_status(
 
 
 # --- Workspace-scoped data API (everything below lives under /workspace/{workspace_id}) ---
-
-
-async def require_workspace(workspace_id: str) -> dict:
-    """Path dependency: validate the slug and confirm the workspace is active.
-    Returns the registry row (with `id` = public id and `lightrag_workspace` = physical
-    workspace). 404 if the slug is malformed, unknown, or soft-deleted."""
-    if not _is_valid_slug(workspace_id):
-        raise HTTPException(404, f"Workspace {workspace_id!r} not found")
-    row = await workspaces._lookup_workspace(workspace_id)
-    if row is None:
-        raise HTTPException(404, f"Workspace {workspace_id!r} not found")
-    return row
 
 
 @app.post(

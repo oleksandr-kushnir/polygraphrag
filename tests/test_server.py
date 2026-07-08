@@ -585,7 +585,7 @@ def test_batch_summary_counts():
         {"status": "failed"},
         {"status": "save_failed"},
     ]
-    summary = server._batch_summary(entries)
+    summary = server.deps._batch_summary(entries)
     assert summary["done"] == 2
     assert summary["failed"] == 1
     assert summary["save_failed"] == 1
