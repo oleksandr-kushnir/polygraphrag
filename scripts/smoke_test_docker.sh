@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Live end-to-end smoke test against a RUNNING PolyGraphRAG deployment.
 #
-# Unlike smoke_test.py (in-process, LightRAG/Postgres stubbed out), this drives the
+# Unlike scripts/smoke_test.py (in-process, LightRAG/Postgres stubbed out), this drives the
 # real container over HTTP: it boots a fresh workspace and runs a query + graph fetch,
 # which forces LightRAG's PG*Storage.initialize_storages() over asyncpg against the
 # live Postgres + pgvector + Apache AGE backend. That is the path that would break if a
 # required Postgres driver (e.g. psycopg2) were missing.
 #
-# Usage:
+# Usage (from the repo root):
 #   docker compose up -d
-#   ./smoke_test_docker.sh                 # reads RAG_PORT / API_TOKENS from .env
-#   RAG_PORT=9632 API_TOKEN=xxx ./smoke_test_docker.sh
+#   ./scripts/smoke_test_docker.sh                 # reads RAG_PORT / API_TOKENS from .env
+#   RAG_PORT=9632 API_TOKEN=xxx ./scripts/smoke_test_docker.sh
 #
 # Exit 0 if every check passes, 1 otherwise (suitable for CI / post-deploy gating).
 set -uo pipefail

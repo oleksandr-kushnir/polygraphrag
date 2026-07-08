@@ -51,7 +51,7 @@ Retrieval-augmented n8n flows and tool-calling agents get a **multimodal, graph-
 - 🧩 **Genuinely multimodal.** PDFs and images go through a vision model, Office docs via LibreOffice, audio via Whisper, and text/markdown/CSV directly — 22 file types, one upload endpoint.
 - 🕸️ **A real knowledge graph, not just chunks.** LightRAG extracts entities and relationships and stores them in **Apache AGE** (graph) + **pgvector** (embeddings) inside one Postgres. Query modes span local, global, hybrid, and naive retrieval, and `query/data` returns the structured evidence without an LLM answer.
 - ⚙️ **Built to operate.** Async batch ingestion with per-file job tracking and integrity verification, soft-delete + restore of workspaces, per-file delete that correctly preserves entities shared with other documents, and a container `HEALTHCHECK`.
-- ✅ **183 tests, fully mocked.** The suite stubs RAG-Anything, LightRAG, and the database, so `pytest` runs green with **no Postgres and no API keys**.
+- ✅ **220 tests, fully mocked.** The suite stubs RAG-Anything, LightRAG, and the database, so `pytest` runs green with **no Postgres and no API keys**.
 
 ## Architecture
 
@@ -169,21 +169,42 @@ See **[.env.example](.env.example)** for every variable and **[docs/configuratio
 ```bash
 python -m venv .venv && . .venv/Scripts/activate   # or source .venv/bin/activate
 pip install -r requirements-dev.txt
-pytest -q                                          # 183 passed
+pytest -q                                          # 220 passed
 ```
 
 The suite mocks RAG-Anything, LightRAG, and the Postgres pool — no external services, no keys.
+
+Two smoke tests live in **[scripts/](scripts/)**:
+
+```bash
+python scripts/smoke_test.py          # in-process ASGI smoke (stubs, no DB/keys)
+./scripts/smoke_test_docker.sh        # live HTTP smoke against a running stack
+```
 
 ## Project layout
 
 ```
 .
-├── server.py            # the FastAPI service (single module, ~2.3k lines)
+├── server/              # the FastAPI service (package: app + routers + services)
+│   ├── __init__.py      #   app assembly, lifespan, /health, router wiring
+│   ├── config.py        #   env parsing + provider routing
+│   ├── schemas.py       #   Pydantic request models
+│   ├── db.py            #   schema init + metadata persistence
+│   ├── workspaces.py    #   per-workspace RAGAnything instance registry
+│   ├── ingest.py        #   document parsing + ingestion pipeline
+│   ├── worker.py        #   background ingest worker
+│   ├── llm.py           #   LLM / embedding shims
+│   ├── references.py    #   citation + real-path resolution
+│   ├── graph.py         #   knowledge-graph HTML rendering
+│   ├── auth.py          #   opt-in API-token middleware
+│   ├── deps.py          #   shared endpoint dependencies
+│   └── routers/         #   query, documents, and workspace-registry endpoints
 ├── Dockerfile           # app image
 ├── requirements.txt     # runtime deps (lightrag-hku pinned to a release with the AGE fix)
 ├── docker-compose.yml   # db (Postgres + pgvector + AGE) + polygraphrag
 ├── db/                  # Postgres image build + init.sql (extensions)
-├── tests/               # 183 mocked tests
+├── scripts/             # in-process + live-docker smoke tests
+├── tests/               # 220 mocked tests
 └── docs/                # architecture, API reference, configuration, LightRAG internals
 ```
 

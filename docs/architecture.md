@@ -6,7 +6,7 @@ PolyGraphRAG is a thin, operational service layer over two libraries — **RAG-A
 
 | Component | Role |
 |---|---|
-| **`polygraphrag` (FastAPI)** | The HTTP API. Owns workspaces, ingest jobs, file metadata, and model-provider routing. A single module, `server.py`. |
+| **`polygraphrag` (FastAPI)** | The HTTP API. Owns workspaces, ingest jobs, file metadata, and model-provider routing. Structured as the `server/` package (app assembly + `routers/` by resource + service modules). |
 | **RAG-Anything** | Parses each uploaded file into text/structure (LibreOffice for Office docs, a vision model for PDFs/images, Whisper for audio) and drives ingestion. |
 | **LightRAG** | Chunks text, extracts entities/relationships with the LLM, merges them into a knowledge graph, and runs dual-level retrieval at query time. |
 | **Postgres** | Stores everything: the knowledge graph (**Apache AGE**), embeddings (**pgvector**), fuzzy-text indexes (**pg_trgm**), and PolyGraphRAG's own workspace/job/file metadata tables. |

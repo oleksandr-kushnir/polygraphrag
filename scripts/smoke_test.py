@@ -6,14 +6,19 @@ through httpx's in-memory transport — no Postgres, no OpenAI, no running conta
 and LightRAG are stubbed the same way the unit suite stubs them, so this is a fast end-to-end
 sanity check of the HTTP surface, focused on the auth + hardening work.
 
-Run:   python smoke_test.py
+Run:   python scripts/smoke_test.py   (from the repo root)
 Exit:  0 if every check passes, 1 otherwise (suitable for CI / pre-deploy gating).
 """
 
 import asyncio
 import base64
 import sys
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
+
+# Make the repo root importable (this file lives in scripts/) so `import server` resolves
+# regardless of the working directory the script is launched from.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # --------------------------------------------------------------------------- #
 # Stub the heavy deps BEFORE importing server (mirrors tests/test_server.py).

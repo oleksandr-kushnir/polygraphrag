@@ -37,20 +37,13 @@ _ws_locks: dict[str, asyncio.Lock] = (
 _registry_lock = asyncio.Lock()  # guards the dicts above
 
 
-# --- LLM / embedding shims ---
-# Defined in server.llm (they read endpoint config live from server.config); re-exported here
-# because _build_workspace_rag wires them into LightRAG / RAG-Anything.
-# --- Document processing ---
-# Parsing + ingestion live in server.ingest. Re-exported here because upload_batch builds file
-# metadata/paths (_build_metadata, _join_path) and the background worker calls _process_file;
-# IngestionIncompleteError is re-exported for callers/tests that reference server.<name>.
-# --- DB helpers ---
-# Schema init + file/job metadata persistence live in server.db (they take the pool explicitly).
-# --- Workspace instance registry ---
-# Per-workspace RAGAnything instances are built/cached in server.workspaces (reading the shared
-# _rag_instances/_ws_locks/_registry_lock/_db_pool from this module). Endpoints use get_workspace_rag;
-# require_workspace resolves rows via the module (workspaces._lookup_workspace) so a test patch there
-# is seen by both that path and get_workspace_rag's own lookup.
+# --- Re-exported package surface ---
+# Each concern lives in its own submodule; the names below are re-exported on `server` because the
+# background worker (server/worker.py) looks them up as server.* at call time — so the live object,
+# including any test-suite monkeypatch, is always the one used — and lifespan calls some directly.
+# _db_init / _db_reload_jobs / _worker are used by lifespan; _process_file, _process_job and the
+# _db_set_*/ _db_update_status writers are the worker's server.* call-time targets (and _process_file
+# is the suite's patch point); get_workspace_rag is used by lifespan and every router.
 from server.db import _db_init  # noqa: E402
 from server.db import (
     _db_set_doc_id as _db_set_doc_id,
@@ -61,17 +54,9 @@ from server.db import (
 from server.db import (
     _db_update_status as _db_update_status,
 )
-
-# --- Document processing ---
-# The ingestion pipeline lives in server.ingest; _process_file is re-exported because the
-# background worker looks it up as server._process_file (and the test suite patches it there).
 from server.ingest import (  # noqa: E402
     _process_file as _process_file,
 )
-
-# --- Background worker ---
-# The ingestion worker + job reload live in server.worker (a top-level orchestrator that calls the
-# re-exported pipeline functions via server.*). Lifespan starts _worker and calls _db_reload_jobs.
 from server.worker import (  # noqa: E402
     _db_reload_jobs,
     _worker,

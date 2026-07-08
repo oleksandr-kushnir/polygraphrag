@@ -32,7 +32,7 @@ services:
         condition: service_healthy
     environment:
       # --- Postgres connection ---
-      # POSTGRES_DB is read by server.py (its own metadata pool); POSTGRES_DATABASE is
+      # POSTGRES_DB is read by the server (its own metadata pool); POSTGRES_DATABASE is
       # the name LightRAG's PG storage layer reads — both must be set to the same value.
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
@@ -43,7 +43,7 @@ services:
       # POSTGRES_WORKSPACE is deliberately NOT set. If present, LightRAG's process-wide
       # PostgreSQLDB overrides every per-instance workspace= arg, collapsing all workspaces
       # onto one and breaking multi-project isolation. Absent, each LightRAG instance keeps
-      # its own workspace and the rag_workspaces registry drives namespacing. server.py
+      # its own workspace and the rag_workspaces registry drives namespacing. The server
       # falls back to "default" for the primary workspace's physical name.
 
       # --- Text LLM: entity/relationship extraction (ingest) ---

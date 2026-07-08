@@ -28,7 +28,7 @@ ignore = ["E501"]
 # before importing libraries that log at import time, and the test/smoke harnesses stub
 # heavy deps into sys.modules before `import server`.
 "server/__init__.py" = ["E402"]
-"smoke_test.py" = ["E402"]
+"scripts/smoke_test.py" = ["E402"]
 "tests/*" = ["E402"]
 
 [tool.mypy]
