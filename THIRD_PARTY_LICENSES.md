@@ -64,11 +64,12 @@ does not modify these). No source disclosure is required.
 | uvicorn | BSD-3-Clause | https://github.com/encode/uvicorn |
 | python-multipart | Apache-2.0 | https://github.com/Kludex/python-multipart |
 | asyncpg | Apache-2.0 | https://github.com/MagicStack/asyncpg |
-| pyvis | BSD-3-Clause (bundles vis-network, MIT/Apache-2.0) | https://github.com/WestHealth/pyvis |
+| D3.js (vendored JS, not a pip package) | ISC | https://github.com/d3/d3 |
 
-`pyvis` embeds the vis-network JavaScript library into the generated
-`graph.html`; that bundled JS (dual MIT / Apache-2.0) is therefore shipped in
-any exported graph HTML.
+The interactive `graph.html` page is rendered with **D3.js v7**, vendored as
+`server/vendor/d3.v7.min.js` and inlined into the generated page (so the export
+is self-contained/offline). D3 is ISC-licensed; that bundled JS is therefore
+shipped in any exported graph HTML and in the Docker image.
 
 ### Notable transitive dependencies (via `raganything[all]` / `mineru[core]`)
 

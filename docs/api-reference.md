@@ -131,4 +131,4 @@ Useful for building your own UI, debugging retrieval, or feeding another pipelin
 ## Visualization
 
 ### `GET /workspace/{id}/graph.html`
-Returns a self-contained interactive HTML page (built with [pyvis](https://pyvis.readthedocs.io/)) rendering the workspace's knowledge graph — open it directly in a browser. Supports optional filtering by file-path substring so you can focus on one folder's subgraph.
+Returns a self-contained interactive HTML page (built with [D3.js v7](https://d3js.org/), force layout drawn on an HTML canvas, D3 inlined) rendering the workspace's knowledge graph — open it directly in a browser. Supports optional filtering by file-path substring so you can focus on one folder's subgraph.

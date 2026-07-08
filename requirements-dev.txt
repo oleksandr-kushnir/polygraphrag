@@ -8,7 +8,6 @@ fastapi
 pydantic
 python-multipart
 numpy
-pyvis
 
 # Test runner
 pytest

@@ -24,5 +24,5 @@ python-multipart
 # Postgres (pgvector + Apache AGE) storage backend — asyncpg only
 asyncpg
 
-# Interactive knowledge-graph visualization (/workspace/{id}/graph.html)
-pyvis
+# The interactive knowledge-graph page (/workspace/{id}/graph.html) is rendered with D3.js v7,
+# vendored as a JS file at server/vendor/d3.v7.min.js and inlined into the page — no pip dependency.

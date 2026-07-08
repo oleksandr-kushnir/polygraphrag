@@ -148,9 +148,9 @@ async def query_data(req: QueryDataRequest, ws: dict = Depends(require_workspace
     response_class=HTMLResponse,
     summary="Render this workspace's knowledge graph as an interactive HTML page",
     description=(
-        "Returns a **self-contained, offline-capable HTML page** (vis-network JS inlined) "
-        "showing the workspace's LightRAG knowledge graph as an interactive force-directed "
-        "diagram. Nodes are entities (colored by entity type, sized by their connection "
+        "Returns a **self-contained, offline-capable HTML page** (D3.js v7 inlined, drawn on "
+        "an HTML canvas) showing the workspace's LightRAG knowledge graph as an interactive "
+        "force-directed diagram. Nodes are entities (colored by entity type, sized by their connection "
         "degree); edges are relationships. Hover a node or edge to see its full properties.\n\n"
         "Open the URL directly in a browser, or save the response body to a `.html` file. "
         "This returns rendered HTML, **not** JSON — for machine-readable graph data use "
@@ -180,9 +180,9 @@ async def graph_html(
         description="Maximum number of relationship hops to expand out from the starting node(s). Default 3.",
     ),
     max_nodes: int = Query(
-        1000,
+        5000,
         ge=1,
-        description="Hard cap on nodes returned; closest / highest-degree nodes win when truncated. Default 1000.",
+        description="Hard cap on nodes returned; closest / highest-degree nodes win when truncated. Default 5000.",
     ),
     physics: bool = Query(
         True,

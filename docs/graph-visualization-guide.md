@@ -1,80 +1,97 @@
 # Guide: Interactive Knowledge-Graph Visualization in Python
 
 A self-contained, project-agnostic guide to rendering a graph of nodes and
-edges as an interactive HTML page.
+edges as an interactive HTML page — using **D3.js v7** with the force layout
+drawn on an HTML `<canvas>`.
 
 ## 1. What to install
 
+Nothing from pip. The visualization is pure client-side JavaScript: you vendor
+one file, [`d3.v7.min.js`](https://d3js.org/) (~280 KB, the full D3 v7 bundle),
+and inline it into the page. Python's only job is to build a small JSON blob and
+drop it, plus the D3 source, into an HTML template string.
+
 ```bash
-pip install pyvis
+# one-time: fetch the D3 v7 bundle and commit it next to your code
+curl -L https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js -o vendor/d3.v7.min.js
 ```
 
-`pyvis` is a Python wrapper around **vis-network** (a JavaScript graph library).
-You build the graph in Python; it emits an HTML/JS page that renders an
-interactive, draggable, force-directed diagram in any browser. That's the only
-required dependency — no server, no CDN needed.
+Inlining D3 (rather than loading it from a CDN) is what makes the exported page
+**self-contained and offline** — openable by double-click, emailable, no
+internet required.
 
 ## 2. The core idea
 
-You give pyvis:
+You give the page:
 
-- **nodes** — each with an id, a label, a color, a size, and an optional hover
-  tooltip (`title`)
-- **edges** — pairs of node ids, optionally with a tooltip
+- **nodes** — each with an `id`, a `label`, a `color`, a `degree` (drives size),
+  and a plain-text `tooltip`
+- **links** — pairs of node ids, each with a `tooltip`
 
-pyvis produces a single `.html` file. With `cdn_resources="in_line"` the
-vis-network JS/CSS is embedded directly, so the file is **self-contained and
-works offline** (openable by double-click, emailable, no internet).
+D3's [`forceSimulation`](https://github.com/d3/d3-force) computes an
+(x, y) position for every node by simulating repulsion + link springs, and you
+repaint the whole graph on a single `<canvas>` each tick. Canvas draws the entire
+scene with one 2D context — there is no per-node DOM element — so it stays light
+and smooth even for thousands of nodes, where an SVG/DOM approach bogs down.
 
 ## 3. Minimal working example
 
-```python
-from pyvis.network import Network
+```html
+<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
+<canvas id="graph"></canvas>
+<script>/* contents of vendor/d3.v7.min.js inlined here */</script>
+<script>
+const nodes = [{id: "a", label: "Alice"}, {id: "b", label: "Acme"}];
+const links = [{source: "a", target: "b"}];
+const canvas = document.getElementById("graph");
+const ctx = canvas.getContext("2d");
+canvas.width = innerWidth; canvas.height = innerHeight;
 
-net = Network(height="100vh", width="100%", directed=True,
-              bgcolor="#1a1a1a", font_color="#eaeaea",
-              cdn_resources="in_line")
+const sim = d3.forceSimulation(nodes)
+  .force("link", d3.forceLink(links).id(d => d.id).distance(100))
+  .force("charge", d3.forceManyBody().strength(-250))
+  .force("center", d3.forceCenter(innerWidth / 2, innerHeight / 2))
+  .on("tick", draw);
 
-net.add_node("a", label="Alice", title="Person")
-net.add_node("b", label="Acme", title="Company")
-net.add_edge("a", "b", title="works_at")
-
-net.save_graph("graph.html")   # or: html = net.generate_html()
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = "#999";
+  for (const l of links) { ctx.beginPath(); ctx.moveTo(l.source.x, l.source.y); ctx.lineTo(l.target.x, l.target.y); ctx.stroke(); }
+  for (const n of nodes) { ctx.beginPath(); ctx.arc(n.x, n.y, 8, 0, 2 * Math.PI); ctx.fillStyle = "#4e79a7"; ctx.fill(); }
+}
+</script>
+</body></html>
 ```
 
-Open `graph.html` in a browser — you can drag nodes, zoom, and pan.
+`d3.forceLink(...).id(d => d.id)` resolves each link's string `source`/`target`
+into references to the actual node objects, so after the first tick `l.source.x`
+is a real coordinate.
 
 ## 4. A production-quality builder
 
 This is the pattern most real knowledge-graph viewers use: **color nodes by
-category, size them by connectivity, and show full metadata on hover.**
+category, size them by connectivity, show full metadata on hover, and pan/zoom.**
+Python prepares the data and fills an HTML template; all interactivity is D3.
 
 ```python
+import json
 from datetime import datetime, timezone
-from pyvis.network import Network
+from functools import lru_cache
+from pathlib import Path
 
-# A stable categorical palette (colorblind-friendly). vis-network accepts CSS color strings.
+# A stable categorical palette (colorblind-friendly). Canvas accepts CSS color strings.
 PALETTE = [
     "#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f", "#edc948",
     "#b07aa1", "#ff9da7", "#9c755f", "#bab0ac", "#1f77b4", "#d62728",
 ]
 
-# Tooltips are rendered by vis-network as ESCAPED PLAIN TEXT, so HTML tags show
-# literally. Emit "Key: value" lines joined by "\n" and let CSS wrap them.
-TOOLTIP_CSS = """
-<style>
-.vis-tooltip {
-  white-space: pre-wrap !important;
-  max-width: 380px;
-  font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif !important;
-  font-size: 12px !important; line-height: 1.45 !important;
-  padding: 8px 11px !important; border-radius: 6px !important;
-  background-color: #2b2b2b !important; color: #eaeaea !important;
-  border: 1px solid #555 !important;
-  box-shadow: 0 2px 10px rgba(0,0,0,0.45) !important;
-}
-</style>
-"""
+D3_PATH = Path(__file__).parent / "vendor" / "d3.v7.min.js"
+
+
+@lru_cache(maxsize=1)
+def d3_source() -> str:
+    """Read the vendored D3 bundle once (cached across requests)."""
+    return D3_PATH.read_text(encoding="utf-8")
 
 
 def format_value(key, value):
@@ -115,31 +132,39 @@ def build_graph_html(nodes, edges, *, physics=True):
     types = sorted({n.get("type", "unknown") for n in nodes})
     color_of = {t: PALETTE[i % len(PALETTE)] for i, t in enumerate(types)}
 
-    net = Network(height="100vh", width="100%", directed=True,
-                  bgcolor="#1a1a1a", font_color="#eaeaea",
-                  cdn_resources="in_line")
-    net.toggle_physics(physics)
-
+    # 3. Build the {nodes, links} blob the browser will lay out and draw.
+    out_nodes = [
+        {
+            "id": n["id"],
+            "label": str(n.get("label", n["id"])),
+            "color": color_of[n.get("type", "unknown")],
+            "degree": degree.get(n["id"], 0),
+            "tooltip": props_tooltip({"type": n.get("type", "unknown"), **n.get("props", {})}),
+        }
+        for n in nodes
+    ]
     node_ids = {n["id"] for n in nodes}
-    for n in nodes:
-        t = n.get("type", "unknown")
-        net.add_node(
-            n["id"],
-            label=str(n.get("label", n["id"])),
-            title=props_tooltip({"type": t, **n.get("props", {})}),
-            color=color_of[t],
-            size=12 + 3 * degree.get(n["id"], 0),   # bigger = more connected
-        )
-
-    for e in edges:
+    out_links = [
+        {"source": e["source"], "target": e["target"], "tooltip": props_tooltip(e.get("props", {}))}
+        for e in edges
         # Guard against edges pointing at nodes you didn't add (e.g. after truncation).
-        if e["source"] in node_ids and e["target"] in node_ids:
-            net.add_edge(e["source"], e["target"], title=props_tooltip(e.get("props", {})))
+        if e["source"] in node_ids and e["target"] in node_ids
+    ]
 
-    # Inject the tooltip CSS so the "\n"-separated lines wrap legibly.
-    html = net.generate_html()
-    return html.replace("</head>", TOOLTIP_CSS + "</head>", 1)
+    # 4. Script-safe embedding: neutralize any "</..." that could close <script> early.
+    data_json = json.dumps({"nodes": out_nodes, "links": out_links}).replace("</", "<\\/")
+
+    return (
+        HTML_TEMPLATE
+        .replace("__PHYSICS__", "true" if physics else "false")
+        .replace("__DATA_JSON__", data_json)
+        .replace("__D3_SOURCE__", d3_source())
+    )
 ```
+
+`HTML_TEMPLATE` is a string holding the page skeleton (see §5): a `<canvas>`, an
+overlay tooltip `<div>`, the inlined `__D3_SOURCE__`, the embedded `__DATA_JSON__`,
+and a script that runs the simulation + canvas draw loop.
 
 Usage:
 
@@ -159,12 +184,31 @@ with open("graph.html", "w", encoding="utf-8") as f:
 
 | Technique | Why |
 |---|---|
-| `cdn_resources="in_line"` | Makes the HTML a single offline file — no external JS. |
+| Vendor + inline `d3.v7.min.js` | Makes the HTML a single offline file — no external JS, no CDN. |
+| Canvas 2D instead of SVG/DOM nodes | One draw call paints the whole scene; scales to thousands of nodes with low memory and smooth pan/zoom. |
 | Color by category, sorted deterministically | Same category → same color on every render; easy visual grouping. |
-| Size by **degree** (`12 + 3*deg`) | Important/hub nodes pop out visually. |
-| Tooltip as `\n`-joined `Key: value` + `white-space: pre-wrap` CSS | vis-network escapes HTML in tooltips, so you can't use `<br>`; this is the reliable way to get multi-line hover cards. |
-| `physics=False` for large graphs | The force simulation is expensive; freeze the layout once it's big. |
+| Size by **degree** (`radius = 8 + 2*deg`) | Important/hub nodes pop out visually. |
+| Tooltip as `\n`-joined `Key: value` in an overlay `<div>` with `white-space: pre-wrap` | Canvas has no hoverable elements, so hit-test the pointer against node radius / segment distance and show the text in a positioned `<div>`. |
+| `physics=false` → `tick()` in a loop, then `stop()` | The live force simulation is expensive; on large graphs settle it synchronously and draw once (a static layout). |
+| Apply the `d3.zoom` transform via `ctx.translate/scale`, and `devicePixelRatio` on resize | Crisp rendering on HiDPI screens; pan/zoom without touching node coordinates. |
 | Guard edges against missing node ids | Prevents broken/invisible edges when nodes are filtered or capped. |
+
+The heart of the client script:
+
+```js
+const DATA = __DATA_JSON__, PHYSICS = __PHYSICS__;
+const sim = d3.forceSimulation(DATA.nodes)
+  .force("link", d3.forceLink(DATA.links).id(d => d.id).distance(100))
+  .force("charge", d3.forceManyBody().strength(-250))
+  .force("center", d3.forceCenter(innerWidth / 2, innerHeight / 2))
+  .force("collision", d3.forceCollide().radius(d => 8 + 2 * d.degree + 4));
+
+// zoom/pan applied to the canvas; the draw() loop uses the current transform
+d3.select(canvas).call(d3.zoom().scaleExtent([0.1, 5]).on("zoom", e => { transform = e.transform; draw(); }));
+
+if (PHYSICS) sim.on("tick", draw);                       // animate live
+else { sim.stop(); for (let i = 0; i < 300; i++) sim.tick(); draw(); }  // settle then draw once
+```
 
 ## 6. Serving it (optional)
 
@@ -184,10 +228,13 @@ def graph():
 
 ## 7. Alternatives worth knowing
 
-- **`pyvis`** — easiest for interactive HTML (recommended here).
+- **D3.js v7 + canvas** — interactive, self-contained, and light on the client
+  even for large graphs (recommended here).
+- **`pyvis` / vis-network** — quickest to wire up from Python, but renders via
+  heavier per-node objects; slower on big graphs.
 - **`networkx` + `matplotlib`** — static PNG images, good for reports, no interactivity.
 - **`plotly`** — interactive, integrates with dashboards, more setup for graph layouts.
 - **`ipysigma` / `graphviz`** — Jupyter-native or publication-grade static layouts respectively.
 
-For an interactive, self-contained, shareable knowledge-graph page, **pyvis is
-the shortest path.**
+For an interactive, self-contained, shareable knowledge-graph page that stays
+responsive on large graphs, **D3 v7 on a canvas is the sweet spot.**

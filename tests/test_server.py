@@ -1593,8 +1593,8 @@ async def test_graph_html_file_path_filter(client):
     # Only the career node survives the filter (its label is rendered; the finance one is gone).
     assert "career_node" in resp.text
     assert "finance_node" not in resp.text
-    # max_nodes was boosted for the filtered fetch (default 1000 * boost).
-    assert gkg.call_args.kwargs["max_nodes"] == 1000 * server.config.RAG_FILTER_TOPK_BOOST
+    # max_nodes was boosted for the filtered fetch (default 5000 * boost).
+    assert gkg.call_args.kwargs["max_nodes"] == 5000 * server.config.RAG_FILTER_TOPK_BOOST
 
 
 @pytest.mark.asyncio
@@ -1661,7 +1661,12 @@ async def test_graph_html_no_filter_no_boost(client):
     finally:
         rag_stub.lightrag.get_knowledge_graph = orig
     assert resp.status_code == 200
-    assert gkg.call_args.kwargs["max_nodes"] == 1000  # unboosted default
+    assert gkg.call_args.kwargs["max_nodes"] == 5000  # unboosted default
+    # Page is the D3-canvas renderer and fully self-contained (D3 inlined, no CDN).
+    assert "<canvas" in resp.text
+    assert "forceSimulation" in resp.text
+    assert "cdn.jsdelivr" not in resp.text
+    assert "https://d3js.org" in resp.text  # inlined D3 bundle's header comment
 
 
 # --------------------------------------------------------------------------- #
