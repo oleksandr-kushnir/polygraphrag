@@ -6,7 +6,7 @@
   <img alt="Python 3.11" src="https://img.shields.io/badge/python-3.11-blue">
   <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-async-009688">
   <img alt="Postgres" src="https://img.shields.io/badge/Postgres-pgvector%20%2B%20Apache%20AGE-336791">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-183%20passing-brightgreen">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-225%20passing-brightgreen">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-black">
   <a href="https://www.linkedin.com/in/oleksandr-kushnir-ai/"><img alt="LinkedIn" src="https://img.shields.io/badge/LinkedIn-Oleksandr%20Kushnir-0A66C2?logo=linkedin&logoColor=white"></a>
 </p>
@@ -51,7 +51,7 @@ Retrieval-augmented n8n flows and tool-calling agents get a **multimodal, graph-
 - 🧩 **Genuinely multimodal.** PDFs and images go through a vision model, Office docs via LibreOffice, audio via Whisper, and text/markdown/CSV directly — 22 file types, one upload endpoint.
 - 🕸️ **A real knowledge graph, not just chunks.** LightRAG extracts entities and relationships and stores them in **Apache AGE** (graph) + **pgvector** (embeddings) inside one Postgres. Query modes span local, global, hybrid, and naive retrieval, and `query/data` returns the structured evidence without an LLM answer.
 - ⚙️ **Built to operate.** Async batch ingestion with per-file job tracking and integrity verification, soft-delete + restore of workspaces, per-file delete that correctly preserves entities shared with other documents, and a container `HEALTHCHECK`.
-- ✅ **220 tests, fully mocked.** The suite stubs RAG-Anything, LightRAG, and the database, so `pytest` runs green with **no Postgres and no API keys**.
+- ✅ **225 tests, fully mocked.** The suite stubs RAG-Anything, LightRAG, and the database, so `pytest` runs green with **no Postgres and no API keys**.
 
 ## Architecture
 
@@ -169,7 +169,7 @@ See **[.env.example](.env.example)** for every variable and **[docs/configuratio
 ```bash
 python -m venv .venv && . .venv/Scripts/activate   # or source .venv/bin/activate
 pip install -r requirements-dev.txt
-pytest -q                                          # 220 passed
+pytest -q                                          # 225 passed
 ```
 
 The suite mocks RAG-Anything, LightRAG, and the Postgres pool — no external services, no keys.
@@ -201,10 +201,10 @@ python scripts/smoke_test.py          # in-process ASGI smoke (stubs, no DB/keys
 │   └── routers/         #   query, documents, and workspace-registry endpoints
 ├── Dockerfile           # app image
 ├── requirements.txt     # runtime deps (lightrag-hku pinned to a release with the AGE fix)
-├── docker-compose.yml   # db (Postgres + pgvector + AGE) + polygraphrag
+├── docker-compose.yml   # postgres (pgvector + AGE) + polygraphrag services
 ├── db/                  # Postgres image build + init.sql (extensions)
 ├── scripts/             # in-process + live-docker smoke tests
-├── tests/               # 220 mocked tests
+├── tests/               # 225 mocked tests (unit + end-to-end)
 └── docs/                # architecture, API reference, configuration, LightRAG internals
 ```
 

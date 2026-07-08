@@ -38,7 +38,7 @@ Any `QUERY_LLM_*` variable left blank falls back to the corresponding `LLM_*` va
 | `POSTGRES_DB` | `ragdb` | Database name. |
 | `POSTGRES_USER` | `raguser` | Role name. |
 | `POSTGRES_PORT` | `5432` | Host port (bound to loopback). |
-| `POSTGRES_HOST` | `db` | Set by compose to the DB service name. |
+| `POSTGRES_HOST` | `postgres` | Set by compose to the DB service name (`postgres`). |
 | `POSTGRES_WORKSPACE` | `default` | Physical LightRAG namespace backing the primary workspace. |
 
 ### Text LLM

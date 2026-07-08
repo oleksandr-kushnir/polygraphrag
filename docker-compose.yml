@@ -1,10 +1,10 @@
 name: polygraphrag
 
 services:
-  db:
+  postgres:
     build: ./db
     image: polygraphrag-postgres:local
-    container_name: polygraphrag-db
+    container_name: polygraphrag-postgres
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-ragdb}
       POSTGRES_USER: ${POSTGRES_USER:-raguser}
@@ -28,13 +28,13 @@ services:
     image: polygraphrag:local
     container_name: polygraphrag
     depends_on:
-      db:
+      postgres:
         condition: service_healthy
     environment:
       # --- Postgres connection ---
       # POSTGRES_DB is read by the server (its own metadata pool); POSTGRES_DATABASE is
       # the name LightRAG's PG storage layer reads — both must be set to the same value.
-      POSTGRES_HOST: db
+      POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB:-ragdb}
       POSTGRES_DATABASE: ${POSTGRES_DB:-ragdb}
