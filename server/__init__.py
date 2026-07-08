@@ -21,7 +21,6 @@ from raganything import RAGAnything
 # server.config and patched there.
 from server.config import (
     API_TOKENS,
-    MAX_RETRIES,
     POSTGRES_DB,
     POSTGRES_HOST,
     POSTGRES_PASSWORD,
@@ -64,9 +63,15 @@ from server import workspaces  # noqa: E402
 from server.db import (  # noqa: E402
     _db_init,
     _db_insert_job,
-    _db_set_doc_id,
-    _db_set_lightrag_key,
-    _db_update_status,
+)
+from server.db import (
+    _db_set_doc_id as _db_set_doc_id,
+)
+from server.db import (
+    _db_set_lightrag_key as _db_set_lightrag_key,
+)
+from server.db import (
+    _db_update_status as _db_update_status,
 )
 
 # --- References (real-path resolution) ---
@@ -77,7 +82,9 @@ from server.graph import _build_graph_html  # noqa: E402
 from server.ingest import (  # noqa: E402
     _build_metadata,
     _join_path,
-    _process_file,
+)
+from server.ingest import (
+    _process_file as _process_file,
 )
 from server.references import (  # noqa: E402
     _build_references,
@@ -103,120 +110,18 @@ def _query_param(QueryParam, *, mode, include_references=None, top_k=None, chunk
     return QueryParam(**kwargs)
 
 
-def _job_path(workspace_id: str, job_id: str, filename: str) -> Path:
-    """On-disk path for an uploaded file, namespaced per workspace.
-
-    The filename is basenamed with `_safe_ref_name` (same helper that builds the LightRAG
-    key) so a caller-supplied separator can neither create stray subdirectories nor escape
-    the workspace dir via traversal (`../..`). The `{job_id}_` prefix keeps it unique.
-    """
-    d = Path(WORKING_DIR) / workspace_id
-    d.mkdir(parents=True, exist_ok=True)
-    return d / f"{job_id}_{_safe_ref_name(filename)}"
-
-
-async def _db_reload_jobs(pool) -> None:
-    rows = await pool.fetch(
-        "SELECT * FROM rag_file_metadata WHERE status NOT IN ('done', 'failed', 'save_failed')"
-    )
-    for row in rows:
-        row = dict(row)
-        job_id = row["job_id"]
-        physical = row["workspace"]  # rag_file_metadata stores the physical workspace
-        # Resolve the public id the worker uses to route to the right instance.
-        pub_row = await pool.fetchrow(
-            "SELECT id FROM rag_workspaces WHERE lightrag_workspace = $1 AND deleted_at IS NULL "
-            "ORDER BY is_primary DESC LIMIT 1",
-            physical,
-        )
-        record = {
-            "job_id": job_id,
-            "batch_id": row["batch_id"],
-            "workspace": physical,
-            "file": row["file"],
-            "status": "pending",
-            "attempts": row["attempts"],
-            "error": None,
-        }
-        _jobs[job_id] = record
-        _batches.setdefault(row["batch_id"], []).append(record)
-        dest = Path(WORKING_DIR) / physical / f"{job_id}_{row['file']}"
-        if pub_row is not None and dest.exists():
-            description_text = _build_metadata(
-                row["description"] or "", row["source_path"] or "", row["last_modified_time"] or ""
-            )
-            # Re-hand LightRAG the same identity (lightrag_input), NOT the real display file_path.
-            lightrag_input = f"{job_id}_{_safe_ref_name(row['file'])}"
-            await _db_update_status(pool, job_id, "pending", row["attempts"], None)
-            await _job_queue.put((pub_row["id"], job_id, dest, description_text, lightrag_input))
-        else:
-            record["status"] = "failed"
-            record["error"] = "File missing after restart"
-            await _db_update_status(
-                pool, job_id, "failed", row["attempts"], "File missing after restart"
-            )
-
-
 # --- Background worker ---
-
-
-async def _process_job(
-    workspace_id: str,
-    job_id: str,
-    dest: Path,
-    description_text: str,
-    file_path: str | None = None,
-) -> None:
-    """Process one queued job into its workspace, with retry/backoff bookkeeping.
-    Resolves the workspace's RAGAnything instance and serialises the insert on that
-    workspace's lock. Re-enqueues (with workspace) on transient failure until MAX_RETRIES."""
-    job = _jobs[job_id]
-    job["status"] = "processing"
-    if _db_pool:
-        await _db_update_status(_db_pool, job_id, "processing", job["attempts"], None)
-    try:
-        rag_instance = await get_workspace_rag(workspace_id)
-        lock = await _get_ws_lock(workspace_id)
-        async with lock:
-            result = await _process_file(
-                dest, rag_instance, description_text=description_text, file_path=file_path
-            )
-        # `_process_file` returns (doc_id, lightrag_key); tolerate a bare doc_id from older mocks.
-        doc_id, lightrag_key = result if isinstance(result, tuple) else (result, None)
-        job["status"] = "done"
-        job["doc_id"] = doc_id
-        if _db_pool:
-            await _db_update_status(_db_pool, job_id, "done", job["attempts"], None)
-            if doc_id:
-                await _db_set_doc_id(_db_pool, job_id, doc_id)
-            if lightrag_key:
-                await _db_set_lightrag_key(_db_pool, job_id, lightrag_key)
-        # The DB index is the system of record; the raw bytes are redundant once ingested
-        # (the source lives in the workspace), so drop them on success. Kept on retry/failure.
-        dest.unlink(missing_ok=True)
-    except Exception as exc:
-        job["attempts"] += 1
-        job["error"] = str(exc)
-        if job["attempts"] < MAX_RETRIES:
-            job["status"] = "retrying"
-            if _db_pool:
-                await _db_update_status(_db_pool, job_id, "retrying", job["attempts"], str(exc))
-            await _job_queue.put((workspace_id, job_id, dest, description_text, file_path))
-        else:
-            job["status"] = "failed"
-            if _db_pool:
-                await _db_update_status(_db_pool, job_id, "failed", job["attempts"], str(exc))
-            dest.unlink(missing_ok=True)
-
-
-async def _worker():
-    while True:
-        workspace_id, job_id, dest, description_text, file_path = await _job_queue.get()
-        try:
-            await _process_job(workspace_id, job_id, dest, description_text, file_path)
-        finally:
-            _job_queue.task_done()
-
+# The ingestion worker + job reload + on-disk job path live in server.worker (a top-level
+# orchestrator that calls the re-exported pipeline functions via server.*). Lifespan starts
+# _worker and calls _db_reload_jobs; upload_batch uses _job_path.
+from server.worker import (  # noqa: E402
+    _db_reload_jobs,
+    _job_path,
+    _worker,
+)
+from server.worker import (
+    _process_job as _process_job,
+)
 
 # --- Startup / shutdown ---
 

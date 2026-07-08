@@ -364,15 +364,15 @@ async def test_failed_permanently_file_deleted(tmp_path):
         "batch_id": "b",
     }
 
-    original_max = server.MAX_RETRIES
-    server.MAX_RETRIES = 1
+    original_max = server.config.MAX_RETRIES
+    server.config.MAX_RETRIES = 1
     with (
         patch.object(server, "_process_file", new=AsyncMock(side_effect=RuntimeError("fail"))),
         patch.object(server, "get_workspace_rag", new=AsyncMock(return_value=rag_stub)),
     ):
         await server._process_job("alex", job_id, path, "")
 
-    server.MAX_RETRIES = original_max
+    server.config.MAX_RETRIES = original_max
     assert not path.exists()
     assert server._jobs[job_id]["status"] == "failed"
 
@@ -467,11 +467,11 @@ async def test_retry_up_to_max_retries_5(tmp_path):
         "batch_id": "b",
     }
     await server._job_queue.put(("alex", job_id, path, "", None))
-    original = server.MAX_RETRIES
-    server.MAX_RETRIES = 5
+    original = server.config.MAX_RETRIES
+    server.config.MAX_RETRIES = 5
     mock = AsyncMock(side_effect=RuntimeError("permanent"))
     await _run_worker_until_terminal(job_id, path, "", mock)
-    server.MAX_RETRIES = original
+    server.config.MAX_RETRIES = original
     assert server._jobs[job_id]["status"] == "failed"
     assert server._jobs[job_id]["attempts"] == 5
     assert not path.exists()
@@ -519,11 +519,11 @@ async def test_max_retries_env_var_override(tmp_path, monkeypatch):
         "batch_id": "b",
     }
     await server._job_queue.put(("alex", job_id, path, "", None))
-    original = server.MAX_RETRIES
-    server.MAX_RETRIES = 2
+    original = server.config.MAX_RETRIES
+    server.config.MAX_RETRIES = 2
     mock = AsyncMock(side_effect=RuntimeError("perm"))
     await _run_worker_until_terminal(job_id, path, "", mock)
-    server.MAX_RETRIES = original
+    server.config.MAX_RETRIES = original
     assert server._jobs[job_id]["status"] == "failed"
     assert server._jobs[job_id]["attempts"] == 2
 
@@ -542,8 +542,8 @@ async def test_error_field_reflects_last_attempt(tmp_path):
         "batch_id": "b",
     }
     await server._job_queue.put(("alex", job_id, path, "", None))
-    original = server.MAX_RETRIES
-    server.MAX_RETRIES = 2
+    original = server.config.MAX_RETRIES
+    server.config.MAX_RETRIES = 2
 
     attempt = 0
 
@@ -553,7 +553,7 @@ async def test_error_field_reflects_last_attempt(tmp_path):
         raise RuntimeError(f"error attempt {attempt}")
 
     await _run_worker_until_terminal(job_id, path, "", AsyncMock(side_effect=_variable_error))
-    server.MAX_RETRIES = original
+    server.config.MAX_RETRIES = original
     assert "attempt 2" in server._jobs[job_id]["error"]
 
 
@@ -781,10 +781,10 @@ async def test_status_failed_after_max_retries(tmp_path, client):
     with patch.object(server, "WORKING_DIR", str(tmp_path)):
         resp = await client.post(f"{WS}/upload/batch", files=[_fake_upload("bad.txt")])
     job_id = resp.json()["jobs"][0]["job_id"]
-    original = server.MAX_RETRIES
-    server.MAX_RETRIES = 2
+    original = server.config.MAX_RETRIES
+    server.config.MAX_RETRIES = 2
     await _drain_queue(AsyncMock(side_effect=RuntimeError("always fails")))
-    server.MAX_RETRIES = original
+    server.config.MAX_RETRIES = original
     sr = await client.get(f"{WS}/status/{job_id}")
     data = sr.json()
     assert data["status"] == "failed"
@@ -811,8 +811,8 @@ async def test_status_retrying_intermediate(tmp_path, client):
         resp = await client.post(f"{WS}/upload/batch", files=[_fake_upload("retry.txt")])
     job_id = resp.json()["jobs"][0]["job_id"]
 
-    original = server.MAX_RETRIES
-    server.MAX_RETRIES = 3
+    original = server.config.MAX_RETRIES
+    server.config.MAX_RETRIES = 3
     call_count = 0
 
     async def _fail_first(p, rag_instance=None, description_text="", file_path=None):
@@ -837,7 +837,7 @@ async def test_status_retrying_intermediate(tmp_path, client):
 
     # Finish it
     await _drain_queue(AsyncMock(return_value=None))
-    server.MAX_RETRIES = original
+    server.config.MAX_RETRIES = original
     sr2 = await client.get(f"{WS}/status/{job_id}")
     assert sr2.json()["status"] == "done"
 
@@ -1076,8 +1076,8 @@ async def test_worker_updates_db_on_failed(tmp_path):
         "batch_id": "b",
     }
 
-    original = server.MAX_RETRIES
-    server.MAX_RETRIES = 1
+    original = server.config.MAX_RETRIES
+    server.config.MAX_RETRIES = 1
     with (
         patch.object(
             server, "_process_file", new=AsyncMock(side_effect=RuntimeError("permanent failure"))
@@ -1085,7 +1085,7 @@ async def test_worker_updates_db_on_failed(tmp_path):
         patch.object(server, "get_workspace_rag", new=AsyncMock(return_value=rag_stub)),
     ):
         await server._process_job("alex", job_id, path, "")
-    server.MAX_RETRIES = original
+    server.config.MAX_RETRIES = original
 
     update_calls = [str(c) for c in _mock_pool.execute.call_args_list]
     failed_calls = [c for c in update_calls if "failed" in c]
@@ -2307,11 +2307,11 @@ async def test_partial_ingest_retries_then_fails_via_process_job(tmp_path):
         "batch_id": "b",
     }
     rag_stub.lightrag.aget_docs_by_ids.return_value = _docs(status="failed")
-    original = server.MAX_RETRIES
-    server.MAX_RETRIES = 1
+    original = server.config.MAX_RETRIES
+    server.config.MAX_RETRIES = 1
     with patch.object(server, "get_workspace_rag", new=AsyncMock(return_value=rag_stub)):
         await server._process_job("alex", job_id, path, "")
-    server.MAX_RETRIES = original
+    server.config.MAX_RETRIES = original
     assert server._jobs[job_id]["status"] == "failed"
     assert "incomplete" in server._jobs[job_id]["error"]
     rag_stub.lightrag.adelete_by_doc_id.assert_awaited()
