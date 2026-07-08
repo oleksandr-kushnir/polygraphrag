@@ -2573,13 +2573,13 @@ async def test_workspace_status_soft_deleted_shows_inactive(client):
 @pytest.fixture
 def _restore_llm_flag():
     """Save/restore the module-level _LLM_IS_OPENAI flag mutated per test."""
-    original = server._LLM_IS_OPENAI
+    original = server.config._LLM_IS_OPENAI
     yield
-    server._LLM_IS_OPENAI = original
+    server.config._LLM_IS_OPENAI = original
 
 
 def test_llm_call_kwargs_openai_path_keeps_max_completion_tokens(_restore_llm_flag):
-    server._LLM_IS_OPENAI = True
+    server.config._LLM_IS_OPENAI = True
     out = server._llm_call_kwargs(
         {"temperature": 0.2, "max_completion_tokens": 16000, "max_tokens": 999, "stream": True}
     )
@@ -2588,7 +2588,7 @@ def test_llm_call_kwargs_openai_path_keeps_max_completion_tokens(_restore_llm_fl
 
 
 def test_llm_call_kwargs_thirdparty_translates_to_max_tokens(_restore_llm_flag):
-    server._LLM_IS_OPENAI = False
+    server.config._LLM_IS_OPENAI = False
     out = server._llm_call_kwargs(
         {"temperature": 0.2, "max_completion_tokens": 16000, "stream": True}
     )
@@ -2597,14 +2597,14 @@ def test_llm_call_kwargs_thirdparty_translates_to_max_tokens(_restore_llm_flag):
 
 
 def test_llm_call_kwargs_thirdparty_prefers_explicit_max_tokens(_restore_llm_flag):
-    server._LLM_IS_OPENAI = False
+    server.config._LLM_IS_OPENAI = False
     out = server._llm_call_kwargs({"max_tokens": 8000, "max_completion_tokens": 16000})
     # An explicit max_tokens is honoured as-is (no translation/overwrite).
     assert out == {"max_tokens": 8000}
 
 
 def test_llm_call_kwargs_drops_unknown_kwargs(_restore_llm_flag):
-    server._LLM_IS_OPENAI = False
+    server.config._LLM_IS_OPENAI = False
     out = server._llm_call_kwargs({"foo": "bar", "n": 3})
     assert out == {}
 
@@ -2639,7 +2639,7 @@ def _reimport_server_with_env(monkeypatch, env: dict):
         monkeypatch.delenv(k, raising=False)
     for k, v in env.items():
         monkeypatch.setenv(k, v)
-    spec = importlib.util.spec_from_file_location("_server_cfg_probe", server.__file__)
+    spec = importlib.util.spec_from_file_location("_server_cfg_probe", server.config.__file__)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -2712,14 +2712,14 @@ def test_query_llm_config_overrides_extraction_config(monkeypatch):
 
 
 def test_active_llm_cfg_switches_on_phase(monkeypatch):
-    monkeypatch.setattr(server, "LLM_MODEL", "extract-model")
-    monkeypatch.setattr(server, "LLM_BASE_URL", "https://openrouter.ai/api/v1")
-    monkeypatch.setattr(server, "LLM_API_KEY", "or-key")
-    monkeypatch.setattr(server, "_LLM_IS_OPENAI", False)
-    monkeypatch.setattr(server, "QUERY_LLM_MODEL", "query-model")
-    monkeypatch.setattr(server, "QUERY_LLM_BASE_URL", None)
-    monkeypatch.setattr(server, "QUERY_LLM_API_KEY", "oai-key")
-    monkeypatch.setattr(server, "QUERY_LLM_IS_OPENAI", True)
+    monkeypatch.setattr(server.config, "LLM_MODEL", "extract-model")
+    monkeypatch.setattr(server.config, "LLM_BASE_URL", "https://openrouter.ai/api/v1")
+    monkeypatch.setattr(server.config, "LLM_API_KEY", "or-key")
+    monkeypatch.setattr(server.config, "_LLM_IS_OPENAI", False)
+    monkeypatch.setattr(server.config, "QUERY_LLM_MODEL", "query-model")
+    monkeypatch.setattr(server.config, "QUERY_LLM_BASE_URL", None)
+    monkeypatch.setattr(server.config, "QUERY_LLM_API_KEY", "oai-key")
+    monkeypatch.setattr(server.config, "QUERY_LLM_IS_OPENAI", True)
 
     # Default (query) phase
     assert server._active_llm_cfg() == ("query-model", None, "oai-key", True)
@@ -2793,14 +2793,14 @@ def _install_fake_openai(monkeypatch, captured):
 
 
 def _set_split_cfg(monkeypatch):
-    monkeypatch.setattr(server, "LLM_MODEL", "extract-model")
-    monkeypatch.setattr(server, "LLM_BASE_URL", "https://openrouter.ai/api/v1")
-    monkeypatch.setattr(server, "LLM_API_KEY", "or-key")
-    monkeypatch.setattr(server, "_LLM_IS_OPENAI", False)
-    monkeypatch.setattr(server, "QUERY_LLM_MODEL", "query-model")
-    monkeypatch.setattr(server, "QUERY_LLM_BASE_URL", None)
-    monkeypatch.setattr(server, "QUERY_LLM_API_KEY", "oai-key")
-    monkeypatch.setattr(server, "QUERY_LLM_IS_OPENAI", True)
+    monkeypatch.setattr(server.config, "LLM_MODEL", "extract-model")
+    monkeypatch.setattr(server.config, "LLM_BASE_URL", "https://openrouter.ai/api/v1")
+    monkeypatch.setattr(server.config, "LLM_API_KEY", "or-key")
+    monkeypatch.setattr(server.config, "_LLM_IS_OPENAI", False)
+    monkeypatch.setattr(server.config, "QUERY_LLM_MODEL", "query-model")
+    monkeypatch.setattr(server.config, "QUERY_LLM_BASE_URL", None)
+    monkeypatch.setattr(server.config, "QUERY_LLM_API_KEY", "oai-key")
+    monkeypatch.setattr(server.config, "QUERY_LLM_IS_OPENAI", True)
 
 
 @pytest.mark.asyncio
@@ -3077,7 +3077,7 @@ async def test_internal_error_not_leaked_to_client(client):
     ],
 )
 def test_log_level_from_env(value, expected):
-    assert server._log_level_from_env(value) == expected
+    assert server.config._log_level_from_env(value) == expected
 
 
 @pytest.mark.asyncio

@@ -91,11 +91,11 @@ async def main() -> int:
         # ---- Pure helper: LOG_LEVEL resolver -----------------------------
         import logging
 
-        check("log_level DEBUG->10", server._log_level_from_env("DEBUG") == logging.DEBUG)
-        check("log_level 'info'->20", server._log_level_from_env("info") == logging.INFO)
-        check("log_level None->INFO", server._log_level_from_env(None) == logging.INFO)
-        check("log_level 'bogus'->INFO", server._log_level_from_env("bogus") == logging.INFO)
-        check("log_level '  Error '->40", server._log_level_from_env("  Error ") == logging.ERROR)
+        check("log_level DEBUG->10", server.config._log_level_from_env("DEBUG") == logging.DEBUG)
+        check("log_level 'info'->20", server.config._log_level_from_env("info") == logging.INFO)
+        check("log_level None->INFO", server.config._log_level_from_env(None) == logging.INFO)
+        check("log_level 'bogus'->INFO", server.config._log_level_from_env("bogus") == logging.INFO)
+        check("log_level '  Error '->40", server.config._log_level_from_env("  Error ") == logging.ERROR)
 
         # ---- Auth DISABLED (default) -------------------------------------
         server.API_TOKENS = []
