@@ -27,7 +27,7 @@ ignore = ["E501"]
 # E402 (import-not-at-top) is intentional in these files: server configures logging
 # before importing libraries that log at import time, and the test/smoke harnesses stub
 # heavy deps into sys.modules before `import server`.
-"server.py" = ["E402"]
+"server/__init__.py" = ["E402"]
 "smoke_test.py" = ["E402"]
 "tests/*" = ["E402"]
 

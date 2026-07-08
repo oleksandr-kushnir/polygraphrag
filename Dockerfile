@@ -16,7 +16,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --timeout 120 --retries 5 -r requirements.txt
 
 WORKDIR /app
-COPY server.py .
+COPY server ./server
 
 EXPOSE 9622
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
