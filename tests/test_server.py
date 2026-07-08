@@ -943,7 +943,7 @@ async def test_query_references_parsed_from_aquery_llm(client):
     assert "source_path" not in refs[0]
     assert refs[0]["llm_model_extracted"] is None  # no DB row -> unknown extractor
     assert (
-        refs[0]["llm_model_answered"] == server.QUERY_LLM_MODEL
+        refs[0]["llm_model_answered"] == server.config.QUERY_LLM_MODEL
     )  # /query reports the query-time answering model
     # The internal LightRAG key must not appear anywhere in the reference payload.
     assert "lightrag_key" not in refs[0]
@@ -1154,7 +1154,7 @@ async def test_query_references_enriched_from_db(client):
     assert ref["last_modified_time"] == "2026-04-01T10:00:00"
     assert ref["uploaded_at"] == "2026-05-08T12:34:56"
     assert ref["llm_model_extracted"] == "deepseek/deepseek-v4-flash"  # per-file extractor
-    assert ref["llm_model_answered"] == server.QUERY_LLM_MODEL  # current query-time answering model
+    assert ref["llm_model_answered"] == server.config.QUERY_LLM_MODEL  # current query-time answering model
     _mock_pool.fetch.return_value = []  # restore default
 
 
@@ -1178,7 +1178,7 @@ async def test_query_references_null_when_no_db_record(client):
     assert ref["uploaded_at"] is None
     assert ref["llm_model_extracted"] is None  # no DB row -> unknown extractor
     assert (
-        ref["llm_model_answered"] == server.QUERY_LLM_MODEL
+        ref["llm_model_answered"] == server.config.QUERY_LLM_MODEL
     )  # answering model present regardless of DB row
 
 
@@ -1431,36 +1431,36 @@ async def test_query_data_exception_returns_500(client):
 
 def test_path_matches_any_empty_needles_keeps_all():
     # Empty / None needle list = no filter, everything passes (even empty values).
-    assert server._path_matches_any("/opt/data/workspace/career/cv.pdf", []) is True
-    assert server._path_matches_any("/opt/data/workspace/career/cv.pdf", None) is True
-    assert server._path_matches_any("", []) is True
-    assert server._path_matches_any(None, []) is True
+    assert server.references._path_matches_any("/opt/data/workspace/career/cv.pdf", []) is True
+    assert server.references._path_matches_any("/opt/data/workspace/career/cv.pdf", None) is True
+    assert server.references._path_matches_any("", []) is True
+    assert server.references._path_matches_any(None, []) is True
 
 
 def test_path_matches_any_single_and_or_semantics():
     p = "/opt/data/workspace/career/cv.pdf"
-    assert server._path_matches_any(p, ["/career/"]) is True
-    assert server._path_matches_any(p, ["/projects/"]) is False
+    assert server.references._path_matches_any(p, ["/career/"]) is True
+    assert server.references._path_matches_any(p, ["/projects/"]) is False
     # OR: matches if ANY needle is a substring.
-    assert server._path_matches_any(p, ["/projects/", "/career/"]) is True
+    assert server.references._path_matches_any(p, ["/projects/", "/career/"]) is True
 
 
 def test_path_matches_any_case_insensitive():
-    assert server._path_matches_any("/opt/Data/Workspace/Career/CV.pdf", ["/career/"]) is True
-    assert server._path_matches_any("/opt/data/workspace/career/cv.pdf", ["/CAREER/"]) is True
+    assert server.references._path_matches_any("/opt/Data/Workspace/Career/CV.pdf", ["/career/"]) is True
+    assert server.references._path_matches_any("/opt/data/workspace/career/cv.pdf", ["/CAREER/"]) is True
 
 
 def test_path_matches_any_empty_value_with_needles_is_no_match():
-    assert server._path_matches_any("", ["/career/"]) is False
-    assert server._path_matches_any(None, ["/career/"]) is False
+    assert server.references._path_matches_any("", ["/career/"]) is False
+    assert server.references._path_matches_any(None, ["/career/"]) is False
 
 
 def test_path_matches_any_sep_joined_list():
     # Entities/relationships carry a GRAPH_FIELD_SEP-joined list of source files; a substring test
     # still matches within the joined string.
     joined = "/opt/data/workspace/notes/a.md<SEP>/opt/data/workspace/career/cv.pdf"
-    assert server._path_matches_any(joined, ["/career/"]) is True
-    assert server._path_matches_any(joined, ["/finance/"]) is False
+    assert server.references._path_matches_any(joined, ["/career/"]) is True
+    assert server.references._path_matches_any(joined, ["/finance/"]) is False
 
 
 @pytest.mark.asyncio
@@ -1543,7 +1543,7 @@ async def test_query_data_file_path_filter_boosts_top_k(client):
         },
     )
     kwargs = lightrag_mod.QueryParam.call_args.kwargs
-    boost = server.RAG_FILTER_TOPK_BOOST
+    boost = server.config.RAG_FILTER_TOPK_BOOST
     assert kwargs.get("top_k") == 12 * boost
     assert kwargs.get("chunk_top_k") == 12 * boost
 
@@ -1594,7 +1594,7 @@ async def test_graph_html_file_path_filter(client):
     assert "career_node" in resp.text
     assert "finance_node" not in resp.text
     # max_nodes was boosted for the filtered fetch (default 1000 * boost).
-    assert gkg.call_args.kwargs["max_nodes"] == 1000 * server.RAG_FILTER_TOPK_BOOST
+    assert gkg.call_args.kwargs["max_nodes"] == 1000 * server.config.RAG_FILTER_TOPK_BOOST
 
 
 @pytest.mark.asyncio
@@ -3273,13 +3273,13 @@ def test_rewrite_answer_refs_resolved_and_unresolved():
     meta = {"20ed9a7c_Tag_1.pdf": {"file": "sub/Tag_1.pdf"}}
     raw = [{"file_path": "20ed9a7c_Tag_1.pdf"}, {"file_path": "beefcafe_notes.txt"}]
     prose = "Body.\n### References\n- [1] 20ed9a7c_Tag_1.pdf\n- [2] beefcafe_notes.txt"
-    out = server._rewrite_answer_refs(prose, raw, meta)
+    out = server.references._rewrite_answer_refs(prose, raw, meta)
     assert "20ed9a7c_Tag_1.pdf" not in out and "beefcafe_notes.txt" not in out
     assert "[1] Tag_1.pdf" in out  # resolved -> clean basename (dir part dropped)
     assert "[2] notes.txt" in out  # unresolved -> hex prefix stripped
     # empty / no-refs are no-ops
-    assert server._rewrite_answer_refs("", raw, meta) == ""
-    assert server._rewrite_answer_refs("text", [], {}) == "text"
+    assert server.references._rewrite_answer_refs("", raw, meta) == ""
+    assert server.references._rewrite_answer_refs("text", [], {}) == "text"
 
 
 def test_rewrite_answer_refs_no_partial_substring_hit():
@@ -3287,7 +3287,7 @@ def test_rewrite_answer_refs_no_partial_substring_hit():
     meta = {}
     raw = [{"file_path": "aa11beef_x.txt"}, {"file_path": "aa11beef_x.txt.bak_extra"}]
     prose = "[1] aa11beef_x.txt.bak_extra and [2] aa11beef_x.txt"
-    out = server._rewrite_answer_refs(prose, raw, meta)
+    out = server.references._rewrite_answer_refs(prose, raw, meta)
     # longest-first replacement keeps the longer token intact as its own stripped form
     assert "aa11beef_x.txt.bak_extra" not in out
     assert "x.txt.bak_extra" in out  # longer key stripped whole
@@ -3313,13 +3313,13 @@ def test_job_path_sanitizes_separators_no_traversal(tmp_path, monkeypatch):
 
 
 def test_path_matches_any_blank_needles_keep_all():
-    assert server._path_matches_any("/x/y.pdf", [""]) is True
-    assert server._path_matches_any("/x/y.pdf", ["  "]) is True
-    assert server._path_matches_any("/x/y.pdf", ["", "  "]) is True
-    assert server._path_matches_any(None, [""]) is True
+    assert server.references._path_matches_any("/x/y.pdf", [""]) is True
+    assert server.references._path_matches_any("/x/y.pdf", ["  "]) is True
+    assert server.references._path_matches_any("/x/y.pdf", ["", "  "]) is True
+    assert server.references._path_matches_any(None, [""]) is True
     # a real needle still filters; blanks alongside a real needle are ignored
-    assert server._path_matches_any("/x/y.pdf", ["/z/"]) is False
-    assert server._path_matches_any("/x/y.pdf", ["", "/x/"]) is True
+    assert server.references._path_matches_any("/x/y.pdf", ["/z/"]) is False
+    assert server.references._path_matches_any("/x/y.pdf", ["", "/x/"]) is True
 
 
 @pytest.mark.asyncio
