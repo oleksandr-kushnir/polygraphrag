@@ -10,7 +10,6 @@ import secrets
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal
 
 
 def _log_level_from_env(value: str | None) -> int:
@@ -33,7 +32,6 @@ logging.basicConfig(
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi import Path as PathParam  # aliased: `Path` is pathlib.Path throughout this module
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel, Field
 from raganything import RAGAnything
 
 WORKING_DIR = os.getenv("WORKING_DIR", "/app/data")
@@ -1382,94 +1380,15 @@ def _internal_error(exc: Exception, context: str) -> HTTPException:
 
 
 # --- API ---
-
-_MODE_DESC = (
-    "Retrieval mode: 'mix' (default, graph + vector — recommended), 'local' (entity-centric), "
-    "'global' (relationship/theme-centric), 'hybrid' (local + global), or 'naive' (plain vector search)."
+# Request models live in server.schemas. Imported by ABSOLUTE name (not `.schemas`) so the
+# config-probe test — which re-execs this file under a throwaway module name via
+# spec_from_file_location — can still resolve it (a relative import has no package there).
+from server.schemas import (  # noqa: E402
+    FileDeleteRequest,
+    QueryDataRequest,
+    QueryRequest,
+    WorkspaceCreate,
 )
-# Constrain mode to the modes LightRAG actually supports: an unknown value is rejected with a
-# 422 up front instead of being passed through to fail (or misbehave) deep in retrieval.
-QueryMode = Literal["mix", "local", "global", "hybrid", "naive"]
-# Upper bound on top_k: the default is 40; a very large value multiplies retrieval + LLM cost,
-# so a single request can't (accidentally or maliciously) run the corpus/LLM budget away.
-_TOP_K_MAX = 1000
-
-
-class QueryRequest(BaseModel):
-    query: str = Field(
-        description="The natural-language question to ask the workspace's corpus.",
-        examples=["What did the Q3 report say about churn?"],
-    )
-    mode: QueryMode = Field("mix", description=_MODE_DESC)
-    include_references: bool = Field(
-        True, description="Include source-document citations in the response. Default true."
-    )
-    # LightRAG's tuned default (entities/relations retrieved per keyword set).
-    top_k: int = Field(
-        40,
-        ge=1,
-        le=_TOP_K_MAX,
-        description=f"Entities/relationships retrieved per keyword set. Default 40, max {_TOP_K_MAX}.",
-    )
-
-
-class QueryDataRequest(BaseModel):
-    query: str = Field(
-        description="The natural-language question used to retrieve graph/vector data.",
-        examples=["List the entities related to onboarding."],
-    )
-    mode: QueryMode = Field("mix", description=_MODE_DESC)
-    include_references: bool = Field(
-        True,
-        description="Resolve and include source-document references for retrieved data. Default true.",
-    )
-    top_k: int = Field(
-        40,
-        ge=1,
-        le=_TOP_K_MAX,
-        description=f"Entities/relationships retrieved per keyword set. Default 40, max {_TOP_K_MAX}.",
-    )
-    file_path_contains: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Optional folder/file scope filter. **Omit it, or leave it empty, to get ALL data "
-            "(no filtering) — this is the default.** When provided, it is a case-insensitive OR "
-            "substring filter on each result's file_path: an entity/relationship/chunk/reference "
-            "is kept if its file_path contains ANY of the strings (blank strings are ignored). "
-            "Matching runs AFTER retrieval (the retrieval budget is auto-boosted when set), so a "
-            "very narrow folder may return fewer items than exist. "
-            'Example (to narrow): ["/corpus/career/", "/corpus/projects/"].'
-        ),
-    )
-
-
-class WorkspaceCreate(BaseModel):
-    id: str = Field(
-        description="Workspace slug — must match ^[a-z][a-z0-9_]{0,47}$. Also used as the storage namespace.",
-        examples=["acme_corp"],
-    )
-    name: str = Field(
-        description="Human-readable display name for the workspace.", examples=["Acme Corp"]
-    )
-    description: str | None = Field(
-        None, description="Optional free-text description of the workspace."
-    )
-    # `lightrag_workspace` is deliberately NOT a field: for API-created workspaces the
-    # service forces lightrag_workspace == id. Any client-supplied value is ignored.
-
-
-class FileDeleteRequest(BaseModel):
-    rel_path: str | None = Field(
-        None,
-        description="Workspace-relative path of the file (matched against the stored source_path).",
-    )
-    external_path: str | None = Field(
-        None,
-        description="Caller-supplied absolute path (matched against the stored LightRAG file_path).",
-    )
-    doc_id: str | None = Field(
-        None, description="LightRAG doc id (`doc-<md5>`). If given, used directly — most precise."
-    )
 
 
 @app.get(
