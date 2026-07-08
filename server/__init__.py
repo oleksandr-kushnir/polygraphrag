@@ -1,12 +1,13 @@
 import asyncio
-import base64
-import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
 from raganything import RAGAnything
+
+# Re-exported (not used here): server.auth reads the token set as server.API_TOKENS at call time,
+# and the test suite toggles auth by setting this attribute.
+from server.config import API_TOKENS as API_TOKENS
 
 # Import config BEFORE the heavy libraries below: importing it runs logging.basicConfig, so
 # LightRAG / RAG-Anything don't emit unconfigured logs at import time. Every config name is
@@ -14,7 +15,6 @@ from raganything import RAGAnything
 # keep working; functions that read config live (e.g. _active_llm_cfg) are defined in
 # server.config and patched there.
 from server.config import (
-    API_TOKENS,
     POSTGRES_DB,
     POSTGRES_HOST,
     POSTGRES_PASSWORD,
@@ -145,53 +145,12 @@ app = FastAPI(
 
 
 # --- Auth (opt-in via API_TOKENS) ---
+# Credential parsing + the gate live in server.auth; registered here as HTTP middleware so it also
+# covers the auto-generated docs. It reads server.API_TOKENS live, so tests toggle auth by setting
+# that attribute.
+from server.auth import _require_auth  # noqa: E402
 
-
-def _auth_enabled() -> bool:
-    """True when at least one API token is configured (read live so tests can toggle it)."""
-    return bool(API_TOKENS)
-
-
-def _token_valid(token: str) -> bool:
-    """Constant-time membership check against the configured tokens."""
-    return any(secrets.compare_digest(token, t) for t in API_TOKENS)
-
-
-def _extract_credential(header: str) -> str | None:
-    """Pull the presented secret out of an Authorization header, supporting both transports:
-    `Bearer <token>` (machines) and `Basic <base64(user:pass)>` (browsers — the token is the
-    password, username is ignored). Returns None if the header is absent/malformed."""
-    if not header:
-        return None
-    scheme, _, rest = header.partition(" ")
-    scheme = scheme.lower()
-    if scheme == "bearer":
-        return rest.strip() or None
-    if scheme == "basic":
-        try:
-            decoded = base64.b64decode(rest.strip()).decode("utf-8", "replace")
-        except (ValueError, TypeError):
-            return None
-        _, sep, password = decoded.partition(":")
-        return password if sep else None
-    return None
-
-
-@app.middleware("http")
-async def _require_auth(request: Request, call_next):
-    """Gate every request behind API_TOKENS when auth is enabled. Applied as middleware (not a
-    route dependency) so it also covers the auto-generated /docs, /redoc and /openapi.json.
-    /health stays open for liveness probes. A 401 carries `WWW-Authenticate: Basic` so browsers
-    show a native login prompt and then auto-attach the credentials to same-origin requests."""
-    if _auth_enabled() and request.url.path != "/health":
-        cred = _extract_credential(request.headers.get("authorization", ""))
-        if not (cred and _token_valid(cred)):
-            return JSONResponse(
-                {"detail": "Unauthorized"},
-                status_code=401,
-                headers={"WWW-Authenticate": 'Basic realm="PolyGraphRAG"'},
-            )
-    return await call_next(request)
+app.middleware("http")(_require_auth)
 
 
 @app.get(
