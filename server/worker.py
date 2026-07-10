@@ -40,7 +40,7 @@ async def _db_reload_jobs(pool) -> None:
         # Resolve the public id the worker uses to route to the right instance.
         pub_row = await pool.fetchrow(
             "SELECT id FROM rag_workspaces WHERE lightrag_workspace = $1 AND deleted_at IS NULL "
-            "ORDER BY is_primary DESC LIMIT 1",
+            "ORDER BY created_at LIMIT 1",
             physical,
         )
         record = {

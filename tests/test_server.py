@@ -1736,10 +1736,12 @@ async def test_batch_json_metadata_per_file(tmp_path, client):
 # --------------------------------------------------------------------------- #
 
 
-def _fresh_pool(primary_row=None):
+def _fresh_pool(existing_ws=None):
     pool = MagicMock()
     pool.execute = AsyncMock()
-    pool.fetchrow = AsyncMock(return_value=primary_row)
+    # _db_seed_default_workspace probes "SELECT id FROM rag_workspaces LIMIT 1"; a non-None row
+    # means the registry is already populated, so the bootstrap seed is skipped.
+    pool.fetchrow = AsyncMock(return_value=existing_ws)
     pool.fetch = AsyncMock(return_value=[])
     return pool
 
@@ -1784,30 +1786,46 @@ async def test_db_init_workspace_column_has_no_default():
 
 
 @pytest.mark.asyncio
-async def test_db_init_seeds_primary_default_when_absent(monkeypatch):
+async def test_db_init_drops_legacy_is_primary_column():
+    # The migration removes the legacy is_primary flag (idempotent DROP COLUMN IF EXISTS).
+    pool = _fresh_pool()
+    await server._db_init(pool)
+    joined = " ".join(str(c) for c in pool.execute.call_args_list)
+    assert "DROP COLUMN IF EXISTS is_primary" in joined
+    # The current schema no longer defines the column.
+    create = [str(c) for c in pool.execute.call_args_list if "CREATE TABLE IF NOT EXISTS rag_workspaces" in str(c)]
+    assert create and "is_primary" not in create[0]
+
+
+@pytest.mark.asyncio
+async def test_db_init_seeds_default_when_registry_empty(monkeypatch):
     monkeypatch.setattr(server.config, "POSTGRES_WORKSPACE", "default")
-    pool = _fresh_pool(primary_row=None)
+    pool = _fresh_pool(existing_ws=None)  # empty registry
     await server._db_init(pool)
     inserts = [c for c in pool.execute.call_args_list if "INSERT INTO rag_workspaces" in str(c)]
-    # The primary workspace seed runs when no primary row exists yet.
+    # The bootstrap seed runs into a completely empty registry, as an ordinary workspace.
     assert len(inserts) >= 1
+    seed_sql = str(inserts[0])
+    assert "is_primary" not in seed_sql  # seeded as a peer, not a primary
     args = inserts[0].args
-    assert server.config.PRIMARY_WORKSPACE_ID in args  # "default"
-    assert server.config.PRIMARY_WORKSPACE_DESCRIPTION in args
+    assert server.config.SEED_WORKSPACE_ID in args  # "default"
+    assert server.config.SEED_WORKSPACE_DESCRIPTION in args
     assert "default" in args  # physical lightrag_workspace == POSTGRES_WORKSPACE
 
 
 @pytest.mark.asyncio
-async def test_db_init_does_not_reseed_when_primary_exists():
-    pool = _fresh_pool(primary_row={"id": "alex"})
+async def test_db_init_does_not_seed_when_any_workspace_exists():
+    # Any existing workspace row (not just a "primary") suppresses the bootstrap seed, so a
+    # deleted `default` never resurrects once other workspaces are in play.
+    pool = _fresh_pool(existing_ws={"id": "alex"})
     await server._db_init(pool)
     inserts = [c for c in pool.execute.call_args_list if "INSERT INTO rag_workspaces" in str(c)]
     assert not inserts
 
 
-def test_primary_workspace_constants():
-    assert server.config.PRIMARY_WORKSPACE_ID == "default"
-    assert server.config.PRIMARY_WORKSPACE_DESCRIPTION == "Default workspace."
+def test_seed_workspace_constants():
+    assert server.config.SEED_WORKSPACE_ID == "default"
+    assert server.config.SEED_WORKSPACE_DESCRIPTION == "Default workspace."
 
 
 # --------------------------------------------------------------------------- #
@@ -1985,11 +2003,16 @@ async def test_soft_delete_sets_deleted_at(client):
 
 
 @pytest.mark.asyncio
-async def test_delete_primary_409(client):
-    pool = _registry_pool(existing={"id": "alex", "is_primary": True, "deleted_at": None})
+async def test_delete_any_workspace_succeeds(client):
+    # No workspace is delete-protected anymore (the primary concept is gone) — even the seeded
+    # `default` soft-deletes normally.
+    pool = _registry_pool(existing={"id": "default", "deleted_at": None, "lightrag_workspace": "default"})
     server._db_pool = pool
-    resp = await client.delete("/workspace/alex")
-    assert resp.status_code == 409
+    resp = await client.delete("/workspace/default")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "soft-deleted"
+    upd = [c for c in pool.execute.call_args_list if "deleted_at = NOW()" in str(c)]
+    assert upd
 
 
 @pytest.mark.asyncio
@@ -2090,24 +2113,27 @@ async def test_purge_skips_graph_drop_when_absent(client, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_purge_primary_409(client):
-    pool = _purge_pool()
+async def test_purge_default_workspace_succeeds(client, tmp_path):
+    # The seeded `default` (physical POSTGRES_WORKSPACE, bare chunk_entity_relation graph) is a
+    # peer now and can be purged like any other — its rows are deleted scoped to its physical name.
+    pool = _purge_pool(graph_exists=True)
     pool.fetchrow = AsyncMock(
         return_value={
-            "id": "alex",
-            "name": "alex",
+            "id": "default",
+            "name": "Default",
             "description": None,
-            "is_primary": True,
             "deleted_at": None,
             "lightrag_workspace": "default",
         }
     )
     server._db_pool = pool
-    resp = await client.delete("/workspace/alex?purge=true")
-    assert resp.status_code == 409
-    # no destructive SQL ran
-    assert not any("drop_graph" in str(c) for c in pool._conn.execute.call_args_list)
-    assert not any("DELETE FROM rag_workspaces" in str(c) for c in pool.execute.call_args_list)
+    with patch.object(server, "WORKING_DIR", str(tmp_path)):
+        resp = await client.delete("/workspace/default?purge=true")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "purged"
+    drops = [str(c) for c in pool._conn.execute.call_args_list if "drop_graph" in str(c)]
+    assert drops and "default_chunk_entity_relation" in drops[0]
+    assert any("DELETE FROM rag_workspaces" in str(c) for c in pool.execute.call_args_list)
 
 
 # --------------------------------------------------------------------------- #

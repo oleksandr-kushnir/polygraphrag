@@ -28,7 +28,7 @@ async def _lookup_workspace(workspace_id: str):
     if server._db_pool is None:
         return None
     return await server._db_pool.fetchrow(
-        "SELECT id, name, description, lightrag_workspace, is_primary "
+        "SELECT id, name, description, lightrag_workspace "
         "FROM rag_workspaces WHERE id = $1 AND deleted_at IS NULL",
         workspace_id,
     )

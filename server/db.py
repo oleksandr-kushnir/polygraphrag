@@ -29,11 +29,13 @@ async def _db_init(pool) -> None:
             name               TEXT NOT NULL,
             description        TEXT,
             lightrag_workspace TEXT NOT NULL,
-            is_primary         BOOLEAN NOT NULL DEFAULT FALSE,
             deleted_at         TIMESTAMPTZ,
             created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
     """)
+    # Migration: drop the legacy is_primary flag. Workspaces are peers now — no primary/special
+    # status, no delete-protection. Idempotent; a no-op on registries created after this change.
+    await pool.execute("ALTER TABLE rag_workspaces DROP COLUMN IF EXISTS is_primary")
     # Add the workspace column WITHOUT a DEFAULT, backfill pre-existing rows with the
     # legacy physical workspace, then enforce NOT NULL. No column default → any future
     # insert that forgets to set workspace fails loudly instead of silently landing in
@@ -81,23 +83,25 @@ async def _db_init(pool) -> None:
         "CREATE INDEX IF NOT EXISTS idx_rag_file_metadata_lightrag_key "
         "ON rag_file_metadata (workspace, lightrag_key)"
     )
-    await _db_seed_primary_workspace(pool)
+    await _db_seed_default_workspace(pool)
 
 
-async def _db_seed_primary_workspace(pool) -> None:
-    """First-boot seed: register the primary workspace (public id `default`), mapping it to the
-    physical LightRAG workspace POSTGRES_WORKSPACE. Skipped once any primary row exists (the DB is
-    authoritative thereafter)."""
-    existing = await pool.fetchrow("SELECT id FROM rag_workspaces WHERE is_primary = TRUE LIMIT 1")
+async def _db_seed_default_workspace(pool) -> None:
+    """Bootstrap seed: on a completely empty registry, register an ordinary `default` workspace
+    (mapped to the physical LightRAG workspace POSTGRES_WORKSPACE) so a fresh install is usable
+    out of the box. Skipped as soon as ANY workspace row exists — so once real workspaces are in
+    play, deleting `default` is permanent and this never re-creates it. The DB is authoritative
+    thereafter."""
+    existing = await pool.fetchrow("SELECT id FROM rag_workspaces LIMIT 1")
     if existing is not None:
         return
     await pool.execute(
-        """INSERT INTO rag_workspaces (id, name, description, lightrag_workspace, is_primary)
-               VALUES ($1, $2, $3, $4, TRUE)
+        """INSERT INTO rag_workspaces (id, name, description, lightrag_workspace)
+               VALUES ($1, $2, $3, $4)
            ON CONFLICT (id) DO NOTHING""",
-        config.PRIMARY_WORKSPACE_ID,
-        config.PRIMARY_WORKSPACE_NAME,
-        config.PRIMARY_WORKSPACE_DESCRIPTION,
+        config.SEED_WORKSPACE_ID,
+        config.SEED_WORKSPACE_NAME,
+        config.SEED_WORKSPACE_DESCRIPTION,
         config.POSTGRES_WORKSPACE,
     )
 

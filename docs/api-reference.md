@@ -41,7 +41,7 @@ List all active workspaces.
 Overview of one workspace: active/soft-deleted state, document counts by status, chunk count, distinct entity/relationship counts, and an ingest-job summary.
 
 ### `DELETE /workspace/{id}`
-Soft-delete a workspace (recoverable). The primary/`default` workspace is delete-protected.
+Soft-delete a workspace (recoverable). Any workspace can be deleted — all workspaces are peers (there is no delete-protected "primary"). Pass `purge=true` to irreversibly delete its data instead.
 
 ### `POST /workspace/{id}/restore`
 Restore a soft-deleted workspace.

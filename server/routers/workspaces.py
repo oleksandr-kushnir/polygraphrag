@@ -20,9 +20,9 @@ from server.workspaces import _get_ws_lock
 
 router = APIRouter()
 
-# Graph storage namespace; a non-default workspace `w` gets AGE graph `{w}_chunk_entity_relation`
-# (see LightRAG PGGraphStorage._get_workspace_graph_name). The default/primary workspace uses the
-# bare `chunk_entity_relation` graph and is delete-protected, so purge never touches it.
+# Graph storage namespace; a workspace `w` gets AGE graph `{w}_chunk_entity_relation`
+# (see LightRAG PGGraphStorage._get_workspace_graph_name). The bootstrap `default` workspace,
+# whose physical name is POSTGRES_WORKSPACE, uses the bare `chunk_entity_relation` graph.
 _AGE_NAMESPACE = "chunk_entity_relation"
 
 
@@ -39,7 +39,7 @@ def _workspace_public(row) -> dict:
 async def _db_get_workspace_any(pool, workspace_id: str):
     """Fetch a workspace row regardless of soft-delete state (for create/delete/restore)."""
     return await pool.fetchrow(
-        "SELECT id, name, description, lightrag_workspace, is_primary, deleted_at "
+        "SELECT id, name, description, lightrag_workspace, deleted_at "
         "FROM rag_workspaces WHERE id = $1",
         workspace_id,
     )
@@ -47,8 +47,9 @@ async def _db_get_workspace_any(pool, workspace_id: str):
 
 async def _purge_workspace_data(pool, physical_workspace: str) -> None:
     """Irreversibly delete one physical workspace's LightRAG data, file metadata, and files.
-    Only ever called for non-primary workspaces (primary is delete-protected), so the shared
-    `chunk_entity_relation` graph and `default` rows are never affected."""
+    Scoped strictly to `physical_workspace`: every DELETE filters on `workspace = $1` and only
+    that workspace's dedicated AGE graph is dropped, so purging one workspace never touches
+    another's rows."""
     # 1. Delete this workspace's rows from every lightrag_* table that has a workspace column.
     tables = await pool.fetch(
         r"SELECT table_name FROM information_schema.columns "
@@ -121,8 +122,8 @@ async def create_workspace(body: WorkspaceCreate):
     if await _db_get_workspace_any(server._db_pool, body.id) is not None:
         raise HTTPException(409, f"Workspace {body.id!r} already exists")
     await server._db_pool.execute(
-        """INSERT INTO rag_workspaces (id, name, description, lightrag_workspace, is_primary)
-               VALUES ($1, $2, $3, $4, FALSE)""",
+        """INSERT INTO rag_workspaces (id, name, description, lightrag_workspace)
+               VALUES ($1, $2, $3, $4)""",
         body.id,
         body.name,
         body.description,
@@ -137,11 +138,10 @@ async def create_workspace(body: WorkspaceCreate):
     description=(
         "By default this is a reversible **soft delete** (hidden from listings, restorable via "
         "`/workspace/{id}/restore`). Pass `purge=true` to **irreversibly** delete the workspace's "
-        "graph, vector rows, file metadata, and on-disk files. The primary workspace cannot be deleted."
+        "graph, vector rows, file metadata, and on-disk files. Any workspace can be deleted."
     ),
     responses={
         404: {"description": "Workspace not found"},
-        409: {"description": "Cannot delete the primary workspace"},
         503: {"description": "Database not initialised yet"},
     },
 )
@@ -156,8 +156,6 @@ async def delete_workspace(
     row = await _db_get_workspace_any(server._db_pool, workspace_id)
     if row is None:
         raise HTTPException(404, f"Workspace {workspace_id!r} not found")
-    if row["is_primary"]:
-        raise HTTPException(409, "Cannot delete the primary workspace")
     if purge:
         await _evict_workspace_instance(workspace_id)
         await _purge_workspace_data(server._db_pool, row["lightrag_workspace"])
@@ -254,7 +252,6 @@ async def workspace_status(
         "id": row["id"],
         "name": row["name"],
         "description": row["description"],
-        "is_primary": row["is_primary"],
         "active": row["deleted_at"] is None,
         "documents": {"by_status": docs_by_status, "total": sum(docs_by_status.values())},
         "chunks": int(chunks or 0),

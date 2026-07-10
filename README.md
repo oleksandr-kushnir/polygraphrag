@@ -84,7 +84,7 @@ flowchart LR
     api --> meta
 ```
 
-Each workspace maps to a physical LightRAG namespace: the primary workspace uses the shared `chunk_entity_relation` AGE graph, and every additional workspace gets its own `{workspace}_chunk_entity_relation` graph plus workspace-scoped vector rows — that's what keeps projects isolated.
+Each workspace maps to a physical LightRAG namespace: the bootstrap `default` workspace (seeded only into an empty registry) uses the shared `chunk_entity_relation` AGE graph, and every workspace created via the API gets its own `{workspace}_chunk_entity_relation` graph plus workspace-scoped vector rows — that's what keeps projects isolated. Workspaces are peers; none is delete-protected.
 
 ## Requires Postgres to run
 

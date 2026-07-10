@@ -171,10 +171,11 @@ RAG_MIN_CONTENT_FOR_ENTITIES = int(os.getenv("RAG_MIN_CONTENT_FOR_ENTITIES", "20
 # to reduce the chance a narrow folder is crowded out before filtering.
 RAG_FILTER_TOPK_BOOST = int(os.getenv("RAG_FILTER_TOPK_BOOST", "5"))
 
-# Primary (seeded) workspace. Its data physically lives under POSTGRES_WORKSPACE
-# (the legacy single-workspace value), but it is addressed by the public id below.
-# POSTGRES_WORKSPACE is read ONLY to seed this row on first boot; afterwards the
-# rag_workspaces table is the single source of truth.
-PRIMARY_WORKSPACE_ID = "default"
-PRIMARY_WORKSPACE_NAME = "Default"
-PRIMARY_WORKSPACE_DESCRIPTION = "Default workspace."
+# Bootstrap workspace. Seeded ONCE, only into a completely empty registry, so a fresh
+# install is usable out of the box. It is an ordinary, deletable workspace — there is no
+# "primary"/special status. Its data physically lives under POSTGRES_WORKSPACE (the legacy
+# single-workspace value, read ONLY to seed this row on first boot); afterwards the
+# rag_workspaces table is the single source of truth and this seed never runs again.
+SEED_WORKSPACE_ID = "default"
+SEED_WORKSPACE_NAME = "Default"
+SEED_WORKSPACE_DESCRIPTION = "Default workspace."

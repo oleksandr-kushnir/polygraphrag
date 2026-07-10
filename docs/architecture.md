@@ -34,9 +34,9 @@ External model providers (LLM, vision, embeddings, Whisper) are reached over HTT
 
 Isolation is the core design property: **each workspace is a separate graph and a separate vector namespace.**
 
-- The **primary** workspace (public id `default`) maps to the physical LightRAG workspace `POSTGRES_WORKSPACE` and uses the shared `chunk_entity_relation` AGE graph. It is delete-protected.
-- Every **additional** workspace `w` gets its own AGE graph `{w}_chunk_entity_relation` and workspace-scoped rows in the shared `lightrag_*` tables (keyed by a `workspace` column).
-- Deleting a non-primary workspace drops its dedicated graph, deletes its workspace-scoped rows from every `lightrag_*` table, removes its file metadata, and clears its on-disk files — with the shared primary graph never touched.
+- Workspaces are **peers** — there is no special "primary" workspace and none is delete-protected. On a *fresh, empty* registry a single ordinary `default` workspace is seeded (mapped to the physical LightRAG workspace `POSTGRES_WORKSPACE`, using the bare `chunk_entity_relation` AGE graph) so the install is usable out of the box; once any workspace exists the seed never runs again, so a deleted `default` stays deleted.
+- Every workspace `w` created via the API gets its own AGE graph `{w}_chunk_entity_relation` and workspace-scoped rows in the shared `lightrag_*` tables (keyed by a `workspace` column).
+- Deleting a workspace (with `purge=true`) drops *only* its own dedicated graph, deletes *only* its workspace-scoped rows from every `lightrag_*` table, removes its file metadata, and clears its on-disk files — every DELETE is filtered on that workspace's physical name, so another workspace's data is never touched.
 
 A small registry table (`rag_workspaces`) maps **public slug → physical namespace** and tracks soft-delete state; a per-workspace lock serializes instance creation and inserts.
 

@@ -83,7 +83,6 @@ async def main() -> int:
             "name": workspace_id,
             "description": None,
             "lightrag_workspace": workspace_id,
-            "is_primary": workspace_id == "alex",
         }
 
     server.workspaces._lookup_workspace = _fake_lookup

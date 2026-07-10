@@ -20,7 +20,6 @@ from server.config import (
     POSTGRES_PASSWORD,
     POSTGRES_PORT,
     POSTGRES_USER,
-    PRIMARY_WORKSPACE_ID,
     WORKING_DIR,
 )
 
@@ -88,15 +87,14 @@ async def lifespan(app: FastAPI):
     await _db_init(_db_pool)
     await _db_reload_jobs(_db_pool)
 
-    # Pre-warm the primary workspace so the existing corpus is ready immediately.
-    # Resolve the ACTUAL primary from the DB (the single source of truth) rather than the
-    # hardcoded PRIMARY_WORKSPACE_ID — the seeded default can be superseded (e.g. reseeded to a
-    # different primary), and loading a stale hardcoded id would 404 and crash startup.
-    # Other workspaces are built lazily on first use via get_workspace_rag().
-    _primary_row = await _db_pool.fetchrow(
-        "SELECT id FROM rag_workspaces WHERE is_primary = TRUE AND deleted_at IS NULL LIMIT 1"
+    # Pre-warm the oldest active workspace so an existing corpus is ready immediately; the rest
+    # build lazily on first use via get_workspace_rag(). Best-effort — an empty registry (nothing
+    # seeded/created yet) simply skips pre-warming rather than crashing startup.
+    _prewarm_row = await _db_pool.fetchrow(
+        "SELECT id FROM rag_workspaces WHERE deleted_at IS NULL ORDER BY created_at LIMIT 1"
     )
-    await get_workspace_rag(_primary_row["id"] if _primary_row else PRIMARY_WORKSPACE_ID)
+    if _prewarm_row is not None:
+        await get_workspace_rag(_prewarm_row["id"])
 
     worker_task = asyncio.create_task(_worker())
     yield

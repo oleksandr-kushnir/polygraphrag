@@ -19,7 +19,7 @@ import asyncio
 import base64
 import io
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -50,7 +50,6 @@ async def _fake_lookup_workspace(workspace_id):
         "name": workspace_id,
         "description": None,
         "lightrag_workspace": workspace_id,
-        "is_primary": workspace_id == "alex",
     }
 
 
@@ -287,7 +286,7 @@ async def test_e2e_workspace_registry_lifecycle(client):
     status = await client.get("/workspace/projects")
     assert status.status_code == 200
     assert status.json()["active"] is True
-    assert status.json()["is_primary"] is False
+    assert "is_primary" not in status.json()  # primary concept removed; workspaces are peers
     assert status.json()["documents"]["total"] == 0
 
     # Soft-delete hides it from the active listing but keeps it restorable.
@@ -310,21 +309,67 @@ async def test_e2e_workspace_registry_lifecycle(client):
 
 
 @pytest.mark.asyncio
-async def test_e2e_delete_primary_workspace_blocked(client):
-    """The primary workspace is delete-protected end-to-end, even though it exists."""
+async def test_e2e_delete_default_workspace_allowed(client):
+    """The seeded `default` is an ordinary peer now (no primary concept), so it soft-deletes
+    like any other workspace and drops out of the active listing."""
     pool = _StatefulRegistryPool()
     pool._rows["default"] = {
         "id": "default",
         "name": "Default",
         "description": None,
         "lightrag_workspace": "default",
-        "is_primary": True,
         "deleted_at": None,
         "created_at": datetime.now(timezone.utc),
     }
     server._db_pool = pool
     resp = await client.delete("/workspace/default")
-    assert resp.status_code == 409
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "soft-deleted"
+    active_ids = [w["id"] for w in (await client.get("/all-workspaces/list")).json()["workspaces"]]
+    assert "default" not in active_ids
+
+
+@pytest.mark.asyncio
+async def test_e2e_workspace_data_isolation(client):
+    """Two peer workspaces route to independent RAG instances: a query to one returns only its
+    own content, never the other's. The API threads ``workspace_id`` end-to-end with no shared or
+    leaked instance. (Real Postgres row-level namespacing is exercised by the live
+    ``scripts/e2e_isolation.py``; here we prove the routing layer keeps workspaces separate.)"""
+
+    def _answer(ws: str) -> dict:
+        return {
+            "status": "success",
+            "data": {"references": [], "chunks": [], "entities": [], "relationships": []},
+            "llm_response": {"content": f"answer-from-{ws}", "is_streaming": False},
+            "metadata": {},
+        }
+
+    instances: dict[str, MagicMock] = {}
+
+    def _make(ws: str) -> MagicMock:
+        m = MagicMock(name=f"rag-{ws}")
+        m.lightrag.aquery_llm = AsyncMock(return_value=_answer(ws))
+        return m
+
+    async def _dispatch(ws: str) -> MagicMock:
+        # One distinct instance per workspace id — the isolation boundary under test.
+        return instances.setdefault(ws, _make(ws))
+
+    server.get_workspace_rag = _dispatch
+
+    a = await client.post("/workspace/alpha/query", json={"query": "who are you?"})
+    b = await client.post("/workspace/beta/query", json={"query": "who are you?"})
+    assert a.status_code == 200 and b.status_code == 200
+
+    # Each workspace answers with only its own content …
+    assert a.json()["result"] == "answer-from-alpha"
+    assert b.json()["result"] == "answer-from-beta"
+    # … and never the other's (no cross-workspace leakage through the routing layer).
+    assert "beta" not in a.json()["result"]
+    assert "alpha" not in b.json()["result"]
+    # Two separate instances were built — nothing is shared across the two workspaces.
+    assert set(instances) == {"alpha", "beta"}
+    assert instances["alpha"] is not instances["beta"]
 
 
 # --------------------------------------------------------------------------- #
