@@ -1,5 +1,9 @@
 # PolyGraphRAG
 
+<p align="center">
+  <img alt="PolyGraphRAG: turning messy multimodal data into production-ready knowledge graphs" src="docs/images/hero.png" width="100%">
+</p>
+
 **A production FastAPI service for multimodal, multi-project knowledge-graph RAG** — ingest PDFs, Office docs, images, and audio; extract an entity/relationship **knowledge graph**; and query it with dual-level retrieval. Provider-agnostic, backed by **Postgres + pgvector + Apache AGE**.
 
 <p>
