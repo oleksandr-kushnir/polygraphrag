@@ -1,8 +1,10 @@
-"""Pydantic request models and the shared query-parameter constraints.
+"""Pydantic request/response models and the shared query-parameter constraints.
 
-These describe the JSON bodies accepted by the query and workspace endpoints. Keeping
-them here (rather than inline in the app module) makes the request contract easy to find
-and lets the routers import a stable schema surface.
+These describe the JSON bodies accepted and returned by the query, document, and workspace
+endpoints. Keeping them here (rather than inline in the app module) makes the API contract
+easy to find, lets the routers import a stable schema surface, and — for response models —
+puts the real field names, nullability, and the job-status enum into /openapi.json where
+tool-calling agents can read them.
 """
 
 from typing import Literal
@@ -109,3 +111,130 @@ class FileDeleteRequest(BaseModel):
                 "Provide at least one identifier: doc_id, external_path, or rel_path."
             )
         return self
+
+
+# --------------------------------------------------------------------------- #
+# Response models — the machine-readable API contract in /openapi.json
+# --------------------------------------------------------------------------- #
+
+# Canonical ingest-JOB status vocabulary. Distinct from LightRAG's internal per-document
+# status (which includes 'processed'): a finished job is 'done'. 'save_failed' means the
+# uploaded bytes could not be written before processing started.
+JobStatus = Literal["pending", "processing", "retrying", "done", "failed", "save_failed"]
+
+
+class HealthResponse(BaseModel):
+    status: str = Field(examples=["ok"])
+
+
+class Reference(BaseModel):
+    """One resolved source-document citation. `file_path` is the REAL, openable path recorded
+    at upload (`path_root/source_path`), or null when the reference can't be resolved to a
+    stored file — LightRAG's internal name is never emitted."""
+
+    reference_id: str | int | None = None
+    file_path: str | None = None
+    job_id: str | None = None
+    file_description: str | None = None
+    last_modified_time: str | None = None
+    uploaded_at: str | None = None
+    llm_model_extracted: str | None = Field(
+        None, description="Text LLM that extracted this document's entities at ingest time."
+    )
+    llm_model_answered: str | None = Field(
+        None, description="Text LLM that synthesised the answer (present on /query only)."
+    )
+
+
+class QueryResponse(BaseModel):
+    result: str = Field(description="The synthesised natural-language answer.")
+    references: list[Reference] = Field(
+        description="Source citations; empty when include_references is false."
+    )
+
+
+class FileIndexEntry(BaseModel):
+    """One row of the durable per-file index (`/files`)."""
+
+    job_id: str | None = None
+    file: str | None = Field(None, description="Original uploaded filename.")
+    file_path: str | None = Field(
+        None, description="Real display path recorded at upload (path_root/source_path)."
+    )
+    source_path: str | None = None
+    doc_id: str | None = Field(None, description="LightRAG doc id (`doc-<md5>`).")
+    content_hash: str | None = Field(None, description="SHA-256 of the ingested bytes.")
+    status: JobStatus
+    last_modified_time: str | None = None
+    uploaded_at: str | None = None
+
+
+class JobRecord(FileIndexEntry):
+    """An ingestion job: the file-index fields plus job bookkeeping."""
+
+    batch_id: str | None = None
+    attempts: int | None = None
+    error: str | None = None
+    description: str | None = None
+
+
+class BatchResponse(BaseModel):
+    batch_id: str
+    summary: dict[str, int] = Field(
+        description="Per-status job counts for the batch, plus 'total'."
+    )
+    jobs: list[JobRecord]
+
+
+class JobsResponse(BaseModel):
+    jobs: list[JobRecord]
+
+
+class FilesResponse(BaseModel):
+    files: list[FileIndexEntry]
+
+
+class FileDeleteResponse(BaseModel):
+    status: Literal["deleted", "noop"]
+    doc_id: str | None = None
+    reason: str | None = Field(None, description="Set to 'not_found' on a noop.")
+
+
+class WorkspacePublic(BaseModel):
+    id: str
+    name: str
+    description: str | None = None
+    created_at: str | None = None
+
+
+class WorkspaceListResponse(BaseModel):
+    workspaces: list[WorkspacePublic]
+
+
+class WorkspaceActionResponse(BaseModel):
+    status: Literal["soft-deleted", "purged", "restored"]
+    id: str
+
+
+class DocumentCounts(BaseModel):
+    by_status: dict[str, int] = Field(
+        description="LightRAG per-DOCUMENT statuses (a different vocabulary than job status)."
+    )
+    total: int
+
+
+class IngestSummary(BaseModel):
+    by_status: dict[str, int] = Field(description="Ingest-JOB counts by status.")
+    last_uploaded_at: str | None = None
+
+
+class WorkspaceOverview(BaseModel):
+    id: str
+    name: str
+    description: str | None = None
+    active: bool = Field(description="False when the workspace is soft-deleted.")
+    documents: DocumentCounts
+    chunks: int
+    entities: int | None = None
+    relationships: int | None = None
+    ingest: IngestSummary

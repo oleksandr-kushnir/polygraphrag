@@ -136,10 +136,67 @@ from server.auth import _require_auth  # noqa: E402
 app.middleware("http")(_require_auth)
 
 
+def _custom_openapi() -> dict:
+    """Default FastAPI schema plus the auth advertisement: securitySchemes for the Bearer/Basic
+    transports the middleware accepts, marked as a global requirement (with /health documented
+    as open). Documentation-only — enforcement stays in the middleware, and behavior is
+    unchanged while API_TOKENS is empty. Also gives Swagger UI an Authorize button."""
+    if app.openapi_schema:
+        return app.openapi_schema
+    from fastapi.openapi.utils import get_openapi
+
+    schema = get_openapi(
+        title=app.title, version=app.version, description=app.description, routes=app.routes
+    )
+    schema.setdefault("components", {})["securitySchemes"] = {
+        "bearerAuth": {
+            "type": "http",
+            "scheme": "bearer",
+            "description": "API token from API_TOKENS (only enforced when API_TOKENS is set).",
+        },
+        "basicAuth": {
+            "type": "http",
+            "scheme": "basic",
+            "description": "Browser transport: any username, the API token as the password.",
+        },
+    }
+    schema["security"] = [{"bearerAuth": []}, {"basicAuth": []}]
+    if "/health" in schema["paths"] and "get" in schema["paths"]["/health"]:
+        schema["paths"]["/health"]["get"]["security"] = []  # liveness probe is never gated
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = _custom_openapi
+
+
+@app.get(
+    "/",
+    summary="Service discovery card",
+    description=(
+        "Small service card for humans and agents landing on the root URL: the service name, "
+        "version, and where to find the interactive docs and machine-readable spec. Gated by "
+        "the same auth as the rest of the API."
+    ),
+)
+async def root():
+    return {
+        "name": app.title,
+        "version": app.version,
+        "docs": "/docs",
+        "openapi": "/openapi.json",
+        "health": "/health",
+    }
+
+
+from server.schemas import HealthResponse  # noqa: E402
+
+
 @app.get(
     "/health",
     summary="Liveness probe",
     description='Returns `{"status": "ok"}` when the service is up. Does not check DB connectivity.',
+    response_model=HealthResponse,
 )
 async def health():
     return {"status": "ok"}

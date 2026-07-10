@@ -2035,18 +2035,39 @@ def test_invalid_slugs(slug):
 
 @pytest.mark.asyncio
 async def test_create_workspace_sets_lightrag_workspace_to_id(client):
+    from datetime import datetime, timezone
+
     pool = _registry_pool(existing=None)
+    # 1st fetchrow: exists-check (None); 2nd: the INSERT ... RETURNING row.
+    pool.fetchrow = AsyncMock(
+        side_effect=[
+            None,
+            {
+                "id": "career",
+                "name": "Career",
+                "description": "x",
+                "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+            },
+        ]
+    )
     server._db_pool = pool
     resp = await client.post(
         "/all-workspaces/create",
         json={"id": "career", "name": "Career", "description": "x", "lightrag_workspace": "HACK"},
     )
     assert resp.status_code == 200
-    inserts = [c for c in pool.execute.call_args_list if "INSERT INTO rag_workspaces" in str(c)]
+    inserts = [c for c in pool.fetchrow.call_args_list if "INSERT INTO rag_workspaces" in str(c)]
     assert len(inserts) == 1
     args = inserts[0].args
     assert args.count("career") >= 2  # id AND lightrag_workspace both 'career'
     assert "HACK" not in args  # client-supplied lightrag_workspace ignored
+    # Create returns the same public shape as the list endpoint (incl. created_at) — P3.5.
+    assert resp.json() == {
+        "id": "career",
+        "name": "Career",
+        "description": "x",
+        "created_at": "2026-01-01T00:00:00+00:00",
+    }
 
 
 @pytest.mark.asyncio
@@ -2670,12 +2691,12 @@ async def test_workspace_status(client):
     )
     pool.fetchval = AsyncMock(
         side_effect=[
-            12,
-            "lightrag_vdb_entity_x",
-            40,
-            "lightrag_vdb_relation_x",
-            55,
-            "2026-05-08T12:00:00",
+            12,  # chunks
+            "2026-05-08T12:00:00",  # last_uploaded_at
+            "lightrag_vdb_entity_x",  # entity table discovery
+            40,  # entity count
+            "lightrag_vdb_relation_x",  # relationship table discovery
+            55,  # relationship count
         ]
     )
     server._db_pool = pool
@@ -2685,6 +2706,8 @@ async def test_workspace_status(client):
     assert data["active"] is True
     assert data["documents"]["by_status"] == {"processed": 3, "failed": 1}
     assert data["documents"]["total"] == 4
+    assert data["entities"] == 40 and data["relationships"] == 55
+    assert data["ingest"]["last_uploaded_at"] == "2026-05-08T12:00:00"
     assert "lightrag_workspace" not in data  # internal storage namespace never leaks to the API
 
 
@@ -3191,6 +3214,76 @@ async def test_multiple_tokens_each_valid(client):
             headers={"Authorization": f"Bearer {tok}"},
         )
         assert resp.status_code == 200
+
+
+# --------------------------------------------------------------------------- #
+# OpenAPI contract — response shapes + job-status enum are machine-visible
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_openapi_declares_response_schemas(client):
+    """Agents read /openapi.json to learn response shapes: the 200 schemas of the main JSON
+    endpoints must be non-empty (a bare dict renders an empty schema)."""
+    spec = (await client.get("/openapi.json")).json()
+
+    def _schema(path, method):
+        content = spec["paths"][path][method]["responses"]["200"]["content"]["application/json"]
+        # A manual `example` (pass-through payloads) sits beside the schema; merge for the check.
+        return {**content.get("schema", {}), "example": content.get("example")}
+
+    for path, method in [
+        ("/workspace/{workspace_id}/query", "post"),
+        ("/workspace/{workspace_id}/query/data", "post"),
+        ("/workspace/{workspace_id}/upload/batch", "post"),
+        ("/workspace/{workspace_id}/status/{job_id}", "get"),
+        ("/workspace/{workspace_id}/jobs", "get"),
+        ("/workspace/{workspace_id}/files", "get"),
+        ("/workspace/{workspace_id}", "get"),
+        ("/all-workspaces/list", "get"),
+        ("/all-workspaces/create", "post"),
+        ("/health", "get"),
+    ]:
+        s = _schema(path, method)
+        assert s.get("$ref") or s.get("properties") or s.get("example"), (path, method)
+
+
+@pytest.mark.asyncio
+async def test_openapi_job_status_is_enum(client):
+    """P3.4: the job status field is a machine-visible enum in the spec, not prose."""
+    spec = (await client.get("/openapi.json")).json()
+    status = spec["components"]["schemas"]["JobRecord"]["properties"]["status"]
+    enum = status.get("enum") or spec["components"]["schemas"].get(status.get("$ref", "").rsplit("/", 1)[-1], {}).get("enum")
+    assert set(enum or []) == {"pending", "processing", "retrying", "done", "failed", "save_failed"}
+
+
+@pytest.mark.asyncio
+async def test_openapi_declares_security_schemes(client):
+    """P3.2: agents reading the spec must discover the (opt-in) Bearer/Basic auth; /health
+    stays documented as open. Documentation-only — enforcement lives in the middleware."""
+    spec = (await client.get("/openapi.json")).json()
+    schemes = spec["components"]["securitySchemes"]
+    assert schemes["bearerAuth"]["type"] == "http" and schemes["bearerAuth"]["scheme"] == "bearer"
+    assert schemes["basicAuth"]["type"] == "http" and schemes["basicAuth"]["scheme"] == "basic"
+    assert {"bearerAuth": []} in spec["security"] and {"basicAuth": []} in spec["security"]
+    assert spec["paths"]["/health"]["get"]["security"] == []
+
+
+@pytest.mark.asyncio
+async def test_root_service_card(client):
+    """P3.3: GET / returns a small discovery card instead of a bare 404."""
+    resp = await client.get("/")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["name"] == "PolyGraphRAG"
+    assert data["docs"] == "/docs" and data["openapi"] == "/openapi.json"
+    assert data["health"] == "/health"
+
+
+@pytest.mark.asyncio
+async def test_root_gated_when_auth_enabled(client):
+    server.API_TOKENS = ["testtok"]
+    assert (await client.get("/")).status_code == 401
 
 
 # --------------------------------------------------------------------------- #

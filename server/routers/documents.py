@@ -18,7 +18,14 @@ from server.db import _db_insert_job
 from server.deps import _batch_response, _internal_error, require_workspace
 from server.ingest import _build_metadata, _join_path
 from server.references import _safe_ref_name
-from server.schemas import FileDeleteRequest
+from server.schemas import (
+    BatchResponse,
+    FileDeleteRequest,
+    FileDeleteResponse,
+    FilesResponse,
+    JobRecord,
+    JobsResponse,
+)
 from server.worker import _job_path
 from server.workspaces import _get_ws_lock
 
@@ -41,6 +48,7 @@ router = APIRouter()
         "Returns a `batch_id` plus a per-file `job_id`; poll `/workspace/{id}/status/{job_id}` or "
         "`/workspace/{id}/batch/{batch_id}` for progress."
     ),
+    response_model=BatchResponse,
     responses={404: {"description": "Workspace not found or soft-deleted"}},
     openapi_extra={
         "requestBody": {
@@ -196,6 +204,7 @@ async def upload_batch(
     "/workspace/{workspace_id}/batch/{batch_id}",
     summary="Get the status of an upload batch",
     description="Return the per-file job statuses and a summary count for a batch returned by upload.",
+    response_model=BatchResponse,
     responses={404: {"description": "Batch not found in this workspace"}},
 )
 async def get_batch(
@@ -213,9 +222,11 @@ async def get_batch(
     "/workspace/{workspace_id}/status/{job_id}",
     summary="Get the status of a single ingestion job",
     description=(
-        "Return one file's ingestion job: status (pending/processing/retrying/done/failed), "
-        "attempt count, and any error."
+        "Return one file's ingestion job: status (`pending`/`processing`/`retrying`/`done`/"
+        "`failed`/`save_failed` — a finished job is `done`, never `processed`), attempt count, "
+        "and any error."
     ),
+    response_model=JobRecord,
     responses={404: {"description": "Job not found in this workspace"}},
 )
 async def get_status(
@@ -239,6 +250,7 @@ async def get_status(
     "/workspace/{workspace_id}/jobs",
     summary="List recent ingestion jobs",
     description="Return the 100 most recent ingestion jobs for this workspace, newest first.",
+    response_model=JobsResponse,
     responses={404: {"description": "Workspace not found or soft-deleted"}},
 )
 async def list_jobs(ws: dict = Depends(require_workspace)):
@@ -291,6 +303,7 @@ def _job_public(row) -> dict:
         "ingested bytes) and `doc_id` (LightRAG `doc-<md5>`), which the sync worker uses to detect "
         "changes and to delete precisely. This is the system of record for *what has been ingested*."
     ),
+    response_model=FilesResponse,
     responses={
         404: {"description": "Workspace not found or soft-deleted"},
         503: {"description": "Database not initialised yet"},
@@ -365,6 +378,8 @@ async def _resolve_doc_for_delete(
         "deletes only entities sourced solely by this file — entities still referenced by other files "
         "correctly survive. The deletion completes before the response returns."
     ),
+    response_model=FileDeleteResponse,
+    response_model_exclude_none=True,
     responses={
         404: {"description": "Workspace not found or soft-deleted"},
         422: {"description": "No identifier given (doc_id / external_path / rel_path)"},

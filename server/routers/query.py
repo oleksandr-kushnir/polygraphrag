@@ -16,7 +16,7 @@ from server.references import (
     _resolve_graph_paths,
     _rewrite_answer_refs,
 )
-from server.schemas import QueryDataRequest, QueryRequest
+from server.schemas import QueryDataRequest, QueryRequest, QueryResponse
 
 router = APIRouter()
 
@@ -43,6 +43,7 @@ def _query_param(QueryParam, *, mode, include_references=None, top_k=None, chunk
         "(resolved server-side from Postgres), never LightRAG's internal name. "
         "For raw retrieved entities/relationships/chunks instead of a prose answer, use `/query/data`."
     ),
+    response_model=QueryResponse,
     responses={404: {"description": "Workspace not found or soft-deleted"}},
 )
 async def query(req: QueryRequest, ws: dict = Depends(require_workspace)):
@@ -87,7 +88,58 @@ async def query(req: QueryRequest, ws: dict = Depends(require_workspace)):
         "exist in it. Example body: "
         '`{"query":"...","file_path_contains":["/opt/data/workspace/career/"]}`.'
     ),
-    responses={404: {"description": "Workspace not found or soft-deleted"}},
+    responses={
+        # The data blocks are LightRAG pass-through (loosely shaped), so the contract is
+        # documented with a static example rather than a model that could drop fields.
+        200: {
+            "description": "Raw retrieved data with resolved real file paths",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": "success",
+                        "message": "Query completed successfully",
+                        "data": {
+                            "entities": [
+                                {
+                                    "entity_name": "Refund Policy",
+                                    "entity_type": "concept",
+                                    "description": "30-day refund window for unused licences.",
+                                    "file_path": "/data/corpus/policies/refunds.pdf",
+                                }
+                            ],
+                            "relationships": [
+                                {
+                                    "src_id": "Refund Policy",
+                                    "tgt_id": "Billing Team",
+                                    "description": "Refunds are executed by the billing team.",
+                                    "file_path": "/data/corpus/policies/refunds.pdf",
+                                }
+                            ],
+                            "chunks": [
+                                {
+                                    "content": "Refunds are granted within 30 days…",
+                                    "file_path": "/data/corpus/policies/refunds.pdf",
+                                }
+                            ],
+                            "references": [
+                                {
+                                    "reference_id": "1",
+                                    "file_path": "/data/corpus/policies/refunds.pdf",
+                                    "job_id": "ab12cd34",
+                                    "file_description": "Refund policy 2026",
+                                    "last_modified_time": "2026-01-05T09:00:00",
+                                    "uploaded_at": "2026-01-06T10:00:00",
+                                    "llm_model_extracted": "gpt-5.4-mini",
+                                }
+                            ],
+                        },
+                        "metadata": {},
+                    }
+                }
+            },
+        },
+        404: {"description": "Workspace not found or soft-deleted"},
+    },
 )
 async def query_data(req: QueryDataRequest, ws: dict = Depends(require_workspace)):
     rag_instance = await server.get_workspace_rag(ws["id"])

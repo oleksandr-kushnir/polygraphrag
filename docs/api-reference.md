@@ -15,10 +15,13 @@ loopback.
 
 ---
 
-## Health
+## Discovery & health
+
+### `GET /`
+Service card: `{"name","version","docs":"/docs","openapi":"/openapi.json","health":"/health"}`. Gated by the same auth as the rest of the API.
 
 ### `GET /health`
-Liveness probe. Returns `{"status":"ok"}`. Does not check the database.
+Liveness probe. Returns `{"status":"ok"}`. Does not check the database. Never requires auth.
 
 ---
 
@@ -32,7 +35,11 @@ Create a new isolated workspace.
 ```json
 { "id": "acme", "name": "Acme Corp", "description": "optional" }
 ```
-`id` doubles as the storage namespace. Returns the created workspace.
+`id` doubles as the storage namespace. Returns the created workspace in the same shape as the list endpoint:
+
+```json
+{ "id": "acme", "name": "Acme Corp", "description": "optional", "created_at": "2026-07-10T09:00:00+00:00" }
+```
 
 ### `GET /all-workspaces/list`
 List all active workspaces. Pass `?deleted=true` to list soft-deleted workspaces instead.
@@ -68,6 +75,27 @@ curl -X POST localhost:9622/workspace/acme/upload/batch \
   -F 'metadata=[{"description":"employee handbook"}]'
 ```
 
+Response:
+
+```json
+{
+  "batch_id": "9f3a1c2b",
+  "summary": { "pending": 1, "total": 1 },
+  "jobs": [
+    {
+      "job_id": "ab12cd34",
+      "file": "handbook.pdf",
+      "file_path": "handbook.pdf",
+      "status": "pending",
+      "attempts": 0,
+      "error": null,
+      "batch_id": "9f3a1c2b",
+      "content_hash": "9c56cc51…"
+    }
+  ]
+}
+```
+
 ### Ingest-job statuses (canonical list)
 
 An ingest job's `status` is one of:
@@ -80,7 +108,25 @@ An ingest job's `status` is one of:
 > poll a job for `processed`; a finished job is `done`.
 
 ### `GET /workspace/{id}/status/{job_id}`
-Status of one ingest job (see the canonical status list above), with error and attempt count.
+Status of one ingest job (see the canonical status list above), with error and attempt count:
+
+```json
+{
+  "job_id": "ab12cd34",
+  "batch_id": "9f3a1c2b",
+  "file": "handbook.pdf",
+  "file_path": "/data/corpus/hr/handbook.pdf",
+  "source_path": "hr/handbook.pdf",
+  "doc_id": "doc-1a2b3c…",
+  "content_hash": "9c56cc51…",
+  "status": "done",
+  "attempts": 0,
+  "error": null,
+  "description": "employee handbook",
+  "last_modified_time": "2026-01-05T09:00:00",
+  "uploaded_at": "2026-01-06T10:00:00"
+}
+```
 
 ### `GET /workspace/{id}/batch/{batch_id}`
 Status of every job in a batch.
@@ -93,7 +139,25 @@ List the 100 most recent ingest jobs for the workspace, newest first.
 ## Files
 
 ### `GET /workspace/{id}/files`
-List ingested files with their stored metadata (path, content hash, doc id, extracting model, timestamps).
+List ingested files with their stored metadata:
+
+```json
+{
+  "files": [
+    {
+      "job_id": "ab12cd34",
+      "file": "handbook.pdf",
+      "file_path": "/data/corpus/hr/handbook.pdf",
+      "source_path": "hr/handbook.pdf",
+      "doc_id": "doc-1a2b3c…",
+      "content_hash": "9c56cc51…",
+      "status": "done",
+      "last_modified_time": "2026-01-05T09:00:00",
+      "uploaded_at": "2026-01-06T10:00:00"
+    }
+  ]
+}
+```
 
 ### `DELETE /workspace/{id}/file/delete`
 Remove one file's document, chunks, and the entities/relationships sourced **only** by it. Identify the file by one of:
@@ -105,6 +169,11 @@ Remove one file's document, chunks, and the entities/relationships sourced **onl
 ```
 
 Entities shared with other documents are preserved (only solely-sourced entities are removed). The document's LLM cache is always cleared. **Idempotent** — deleting an absent file returns a `noop`; a body with none of the three identifiers is rejected with `422`.
+
+```json
+{ "status": "deleted", "doc_id": "doc-1a2b3c…" }     // success
+{ "status": "noop", "reason": "not_found" }          // file wasn't present
+```
 
 ---
 
@@ -126,10 +195,46 @@ Ask a natural-language question and get a synthesized answer.
 
 Returns the answer plus, when `include_references` is true, enriched source-document citations.
 
+Response:
+
+```json
+{
+  "result": "Refunds are granted within 30 days… [1]",
+  "references": [
+    {
+      "reference_id": "1",
+      "file_path": "/data/corpus/policies/refunds.pdf",
+      "job_id": "ab12cd34",
+      "file_description": "Refund policy 2026",
+      "last_modified_time": "2026-01-05T09:00:00",
+      "uploaded_at": "2026-01-06T10:00:00",
+      "llm_model_extracted": "gpt-5.4-mini",
+      "llm_model_answered": "gpt-5.4-mini"
+    }
+  ]
+}
+```
+
 **Reference paths are real, not internal.** Each `references[].file_path` is the **openable document path you supplied at upload** (via `path_root` + `source_path`), resolved server-side from Postgres — **not** LightRAG's internal canonical name. If a reference can't be resolved to a stored file, `file_path` is `null` (the internal name is never exposed). LightRAG 1.5.x canonicalizes its own `file_path` to a basename for dedup; PolyGraphRAG keeps the authoritative path in its own metadata and maps citations back to it, so this stays correct across LightRAG versions.
 
 ### `POST /workspace/{id}/query/data`
-Structured retrieval **without** LLM answer generation — returns the entities, relationships, chunks, and references that retrieval selected. Same fields as `/query`, plus:
+Structured retrieval **without** LLM answer generation — returns the entities, relationships, chunks, and references that retrieval selected:
+
+```json
+{
+  "status": "success",
+  "message": "Query completed successfully",
+  "data": {
+    "entities":      [ { "entity_name": "Refund Policy", "entity_type": "concept", "description": "…", "file_path": "/data/corpus/policies/refunds.pdf" } ],
+    "relationships": [ { "src_id": "Refund Policy", "tgt_id": "Billing Team", "description": "…", "file_path": "/data/corpus/policies/refunds.pdf" } ],
+    "chunks":        [ { "content": "Refunds are granted within 30 days…", "file_path": "/data/corpus/policies/refunds.pdf" } ],
+    "references":    [ { "reference_id": "1", "file_path": "/data/corpus/policies/refunds.pdf", "job_id": "ab12cd34", "…": "…" } ]
+  },
+  "metadata": {}
+}
+```
+
+Same request fields as `/query`, plus:
 
 Every `file_path` in the response — on entities, relationships, chunks, **and** references — is the **real, openable path** resolved from Postgres, never LightRAG's internal name. Entities and relationships drawn from several documents carry their sources as a `<SEP>`-joined list of real paths.
 

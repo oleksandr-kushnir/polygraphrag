@@ -15,7 +15,13 @@ from fastapi import Path as PathParam
 
 import server
 from server.deps import _is_valid_slug
-from server.schemas import WorkspaceCreate
+from server.schemas import (
+    WorkspaceActionResponse,
+    WorkspaceCreate,
+    WorkspaceListResponse,
+    WorkspaceOverview,
+    WorkspacePublic,
+)
 from server.workspaces import _get_ws_lock
 
 router = APIRouter()
@@ -85,6 +91,7 @@ async def _evict_workspace_instance(workspace_id: str) -> None:
     "/all-workspaces/list",
     summary="List workspaces",
     description="List active workspaces, or pass `deleted=true` to list soft-deleted ones instead.",
+    response_model=WorkspaceListResponse,
     responses={503: {"description": "Database not initialised yet"}},
 )
 async def list_workspaces(
@@ -106,8 +113,10 @@ async def list_workspaces(
     summary="Create a workspace",
     description=(
         "Create a new isolated workspace. The `id` becomes both the public slug and the storage "
-        "namespace (its LightRAG `workspace`). Fails if the id is malformed or already in use."
+        "namespace (its LightRAG `workspace`). Fails if the id is malformed or already in use. "
+        "Returns the same workspace representation as `/all-workspaces/list`."
     ),
+    response_model=WorkspacePublic,
     responses={
         409: {"description": "A workspace with this id already exists"},
         422: {"description": "Invalid workspace id (must match ^[a-z][a-z0-9_]{0,47}$)"},
@@ -121,15 +130,17 @@ async def create_workspace(body: WorkspaceCreate):
         raise HTTPException(422, "Invalid workspace id: must match ^[a-z][a-z0-9_]{0,47}$")
     if await _db_get_workspace_any(server._db_pool, body.id) is not None:
         raise HTTPException(409, f"Workspace {body.id!r} already exists")
-    await server._db_pool.execute(
+    row = await server._db_pool.fetchrow(
         """INSERT INTO rag_workspaces (id, name, description, lightrag_workspace)
-               VALUES ($1, $2, $3, $4)""",
+               VALUES ($1, $2, $3, $4)
+               RETURNING id, name, description, created_at""",
         body.id,
         body.name,
         body.description,
         body.id,  # lightrag_workspace := id
     )
-    return {"id": body.id, "name": body.name, "description": body.description}
+    # Same public shape as the list endpoint (including created_at) — no special case for create.
+    return _workspace_public(row)
 
 
 @router.delete(
@@ -140,6 +151,7 @@ async def create_workspace(body: WorkspaceCreate):
         "`/workspace/{id}/restore`). Pass `purge=true` to **irreversibly** delete the workspace's "
         "graph, vector rows, file metadata, and on-disk files. Any workspace can be deleted."
     ),
+    response_model=WorkspaceActionResponse,
     responses={
         404: {"description": "Workspace not found"},
         503: {"description": "Database not initialised yet"},
@@ -172,6 +184,7 @@ async def delete_workspace(
     "/workspace/{workspace_id}/restore",
     summary="Restore a soft-deleted workspace",
     description="Un-delete a workspace that was previously soft-deleted. No effect on purged workspaces.",
+    response_model=WorkspaceActionResponse,
     responses={
         404: {"description": "No soft-deleted workspace with this id to restore"},
         503: {"description": "Database not initialised yet"},
@@ -217,6 +230,7 @@ async def _count_vdb(phys: str, kind: str) -> int | None:
         "Read-only and cheap. This is the 'is this workspace healthy, how much is in it?' check — "
         "distinct from the per-job route `/workspace/{id}/status/{job_id}`."
     ),
+    response_model=WorkspaceOverview,
     responses={
         404: {"description": "Workspace not found (never existed or was purged)"},
         503: {"description": "Database not initialised yet"},

@@ -148,6 +148,14 @@ class _StatefulRegistryPool:
         self._rows: dict[str, dict] = {}
 
     async def execute(self, sql: str, *args):
+        if "SET deleted_at = NOW()" in sql:
+            self._rows[args[0]]["deleted_at"] = datetime.now(timezone.utc)
+        elif "SET deleted_at = NULL" in sql:
+            self._rows[args[0]]["deleted_at"] = None
+        elif "DELETE FROM rag_workspaces" in sql:
+            self._rows.pop(args[0], None)
+
+    async def fetchrow(self, sql: str, *args):
         if "INSERT INTO rag_workspaces" in sql:
             wid, name, description, physical = args
             self._rows[wid] = {
@@ -159,14 +167,7 @@ class _StatefulRegistryPool:
                 "deleted_at": None,
                 "created_at": datetime.now(timezone.utc),
             }
-        elif "SET deleted_at = NOW()" in sql:
-            self._rows[args[0]]["deleted_at"] = datetime.now(timezone.utc)
-        elif "SET deleted_at = NULL" in sql:
-            self._rows[args[0]]["deleted_at"] = None
-        elif "DELETE FROM rag_workspaces" in sql:
-            self._rows.pop(args[0], None)
-
-    async def fetchrow(self, sql: str, *args):
+            return dict(self._rows[wid])
         if "FROM rag_workspaces WHERE id = $1" in sql:
             row = self._rows.get(args[0])
             return dict(row) if row else None
@@ -273,6 +274,7 @@ async def test_e2e_workspace_registry_lifecycle(client):
         json={"id": "projects", "name": "Projects", "description": "work"},
     )
     assert created.status_code == 200
+    assert created.json()["created_at"]  # same public shape as the list endpoint
 
     # Re-creating the same id now conflicts (the pool remembers it).
     dup = await client.post("/all-workspaces/create", json={"id": "projects", "name": "x"})
