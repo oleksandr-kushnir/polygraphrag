@@ -54,7 +54,8 @@ async def _db_reload_jobs(pool) -> None:
         }
         server._jobs[job_id] = record
         server._batches.setdefault(row["batch_id"], []).append(record)
-        dest = Path(server.WORKING_DIR) / physical / f"{job_id}_{row['file']}"
+        # Rebuild the path exactly as _job_path wrote it at upload time (basenamed filename).
+        dest = _job_path(physical, job_id, row["file"])
         if pub_row is not None and dest.exists():
             description_text = _build_metadata(
                 row["description"] or "", row["source_path"] or "", row["last_modified_time"] or ""

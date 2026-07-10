@@ -1093,6 +1093,41 @@ async def test_worker_updates_db_on_failed(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_db_reload_requeues_file_with_separator(tmp_path):
+    """A pending job whose original filename contains a separator must be re-queued after a
+    restart: the on-disk path was written via _job_path (basenamed with _safe_ref_name), so the
+    reload must rebuild it the same way, not from the raw filename."""
+    from server.worker import _db_reload_jobs, _job_path
+
+    job_id = "reload01"
+    row = {
+        "job_id": job_id,
+        "batch_id": "b1",
+        "workspace": "alex",
+        "file": "sub/report.pdf",
+        "status": "processing",
+        "attempts": 0,
+        "error": None,
+        "description": None,
+        "source_path": None,
+        "last_modified_time": None,
+    }
+    pool = MagicMock()
+    pool.fetch = AsyncMock(return_value=[row])
+    pool.fetchrow = AsyncMock(return_value={"id": "alex"})
+    with (
+        patch.object(server, "WORKING_DIR", str(tmp_path)),
+        patch.object(server, "_db_update_status", new=AsyncMock()),
+    ):
+        # Written at upload time via _job_path → basename only ({job}_report.pdf).
+        _job_path("alex", job_id, "sub/report.pdf").write_bytes(b"data")
+        await _db_reload_jobs(pool)
+    assert server._jobs[job_id]["status"] == "pending"
+    assert server._jobs[job_id]["error"] is None
+    assert server._job_queue.qsize() == 1
+
+
+@pytest.mark.asyncio
 async def test_status_falls_back_to_db(client):
     server._db_pool = _mock_pool
     _mock_pool.fetchrow.reset_mock()
