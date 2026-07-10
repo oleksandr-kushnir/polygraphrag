@@ -13,6 +13,10 @@ venv/
 .hypothesis/
 *.egg-info/
 
+# Agent/tooling scratch
+.claude/
+.ruff_cache/
+
 # Local data / working dirs
 data/
 rag-data/

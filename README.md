@@ -39,6 +39,7 @@ PolyGraphRAG wraps [RAG-Anything](https://github.com/HKUDS/RAG-Anything) and [Li
 - **Ingest** — wire a Google Drive / Gmail / webhook trigger straight into `POST /workspace/{id}/upload/batch`. Your automation feeds files in; PolyGraphRAG does the OCR, parsing, transcription, and graph-building.
 - **Query as a tool** — give your agent `POST /workspace/{id}/query` for a synthesized answer, or `POST /workspace/{id}/query/data` for **structured evidence with no LLM answer** — ideal when the agent wants raw facts to reason over instead of prose.
 - **Isolate per client/topic** — one workspace per project means an n8n workflow or a multi-tenant agent can keep every knowledge base cleanly separated on a single deployment.
+- **A machine-readable contract** — `/openapi.json` declares typed response schemas for every endpoint (including the canonical ingest-job status enum) and advertises the Bearer/Basic auth scheme, so a tool-calling agent can learn the entire API from the spec alone, no live probing needed.
 
 Retrieval-augmented n8n flows and tool-calling agents get a **multimodal, graph-aware knowledge store behind a single URL** — point your workflow at it and ship.
 
@@ -139,7 +140,7 @@ curl -X POST localhost:9622/workspace/acme/query \
 
 | Area | Endpoints |
 |------|-----------|
-| Health | `GET /health` |
+| Discovery & health | `GET /` (service card) · `GET /health` |
 | Workspaces | `GET /all-workspaces/list` · `POST /all-workspaces/create` · `GET /workspace/{id}` · `DELETE /workspace/{id}` · `POST /workspace/{id}/restore` |
 | Ingestion | `POST /workspace/{id}/upload/batch` · `GET /workspace/{id}/batch/{batch_id}` · `GET /workspace/{id}/status/{job_id}` · `GET /workspace/{id}/jobs` |
 | Files | `GET /workspace/{id}/files` · `DELETE /workspace/{id}/file/delete` |
