@@ -1153,6 +1153,45 @@ async def test_status_falls_back_to_db(client):
 
 
 @pytest.mark.asyncio
+async def test_job_endpoints_never_leak_internal_columns(client):
+    """The DB fallback of /status/{job_id} and /jobs must project explicit public columns:
+    lightrag_key (JOIN-ONLY per db.py) and the physical workspace name must never surface."""
+    db_row = {
+        "job_id": "leak01",
+        "batch_id": "batch1",
+        "workspace": "alex",
+        "file": "doc.pdf",
+        "file_path": "/real/doc.pdf",
+        "source_path": "doc.pdf",
+        "doc_id": "doc-1",
+        "content_hash": "abc",
+        "status": "done",
+        "attempts": 0,
+        "error": None,
+        "description": None,
+        "last_modified_time": None,
+        "uploaded_at": "2026-01-01T00:00:00",
+        "lightrag_key": "leak01_doc.pdf",
+    }
+    server._db_pool = _mock_pool
+    _mock_pool.fetchrow.return_value = db_row
+    _mock_pool.fetch.return_value = [db_row]
+    try:
+        status = (await client.get(f"{WS}/status/leak01")).json()
+        jobs = (await client.get(f"{WS}/jobs")).json()["jobs"]
+    finally:
+        _mock_pool.fetchrow.return_value = None
+        _mock_pool.fetch.return_value = []
+    for payload in (status, jobs[0]):
+        assert "lightrag_key" not in payload
+        assert "workspace" not in payload
+        assert payload["job_id"] == "leak01"
+        assert payload["status"] == "done"
+        assert payload["batch_id"] == "batch1"
+        assert payload["attempts"] == 0
+
+
+@pytest.mark.asyncio
 async def test_query_references_enriched_from_db(client):
     server._db_pool = _mock_pool
     from datetime import datetime, timezone

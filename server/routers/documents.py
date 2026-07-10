@@ -231,7 +231,7 @@ async def get_status(
             "SELECT * FROM rag_file_metadata WHERE job_id = $1 AND workspace = $2", job_id, phys
         )
         if row:
-            return dict(row)
+            return _job_public(row)
     raise HTTPException(404, f"Job {job_id!r} not found")
 
 
@@ -248,7 +248,7 @@ async def list_jobs(ws: dict = Depends(require_workspace)):
             "SELECT * FROM rag_file_metadata WHERE workspace = $1 ORDER BY uploaded_at DESC LIMIT 100",
             phys,
         )
-        return {"jobs": [dict(r) for r in rows]}
+        return {"jobs": [_job_public(r) for r in rows]}
     jobs = [j for j in server._jobs.values() if j.get("workspace") == phys]
     return {"jobs": jobs[-100:][::-1]}
 
@@ -265,6 +265,19 @@ def _file_index_row(row) -> dict:
         "status": row["status"],
         "last_modified_time": row.get("last_modified_time"),
         "uploaded_at": ua.isoformat() if hasattr(ua, "isoformat") else ua,
+    }
+
+
+def _job_public(row) -> dict:
+    """Public projection of a rag_file_metadata row for the job endpoints: the file-index
+    fields plus job bookkeeping. Never emits lightrag_key (JOIN-ONLY, see db.py) or the
+    physical workspace name."""
+    return {
+        **_file_index_row(row),
+        "batch_id": row.get("batch_id"),
+        "attempts": row.get("attempts"),
+        "error": row.get("error"),
+        "description": row.get("description"),
     }
 
 
