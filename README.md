@@ -7,6 +7,7 @@
   <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-async-009688">
   <img alt="Postgres" src="https://img.shields.io/badge/Postgres-pgvector%20%2B%20Apache%20AGE-336791">
   <img alt="Tests" src="https://img.shields.io/badge/tests-passing-brightgreen">
+  <a href="https://github.com/oleksandr-kushnir/polygraphrag/pkgs/container/polygraphrag"><img alt="Pull from GHCR" src="https://img.shields.io/badge/ghcr.io-pull%20image-2496ED?logo=docker&logoColor=white"></a>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-black">
   <a href="https://www.linkedin.com/in/oleksandr-kushnir-ai/"><img alt="LinkedIn" src="https://img.shields.io/badge/LinkedIn-Oleksandr%20Kushnir-0A66C2?logo=linkedin&logoColor=white"></a>
 </p>
