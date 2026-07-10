@@ -108,8 +108,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="RAG-Anything API",
-    version="1.0.0",
+    title="PolyGraphRAG",
+    version="0.1.0",  # keep in sync with pyproject.toml
     description=(
         "Multimodal RAG service over a Postgres/AGE-backed LightRAG knowledge store. "
         "Documents are ingested per **workspace** (an isolated knowledge graph + vector index); "
