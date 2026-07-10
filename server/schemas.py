@@ -91,7 +91,10 @@ class FileDeleteRequest(BaseModel):
     )
     external_path: str | None = Field(
         None,
-        description="Caller-supplied absolute path (matched against the stored LightRAG file_path).",
+        description=(
+            "Caller-supplied absolute path — the real path recorded at upload "
+            "(`path_root/source_path`)."
+        ),
     )
     doc_id: str | None = Field(
         None, description="LightRAG doc id (`doc-<md5>`). If given, used directly — most precise."

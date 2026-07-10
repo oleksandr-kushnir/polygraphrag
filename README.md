@@ -121,13 +121,13 @@ curl -X POST localhost:9622/workspace/acme/upload/batch \
   -F 'files=@handbook.pdf'
 # -> {"batch_id":"...","jobs":[{"job_id":"ab12cd34", ...}]}
 
-# 3. Poll a job until it's "processed"
+# 3. Poll a job until it's "done" (statuses: pending/processing/retrying/done/failed)
 curl localhost:9622/workspace/acme/status/ab12cd34
 
 # 4. Query the knowledge graph
 curl -X POST localhost:9622/workspace/acme/query \
   -H 'content-type: application/json' \
-  -d '{"query":"How do we handle refunds?","mode":"hybrid"}'
+  -d '{"query":"How do we handle refunds?","mode":"mix"}'
 
 # 5. Open the interactive graph in a browser
 #    http://localhost:9622/workspace/acme/graph.html

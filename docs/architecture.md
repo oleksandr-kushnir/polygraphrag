@@ -19,7 +19,7 @@ External model providers (LLM, vision, embeddings, Whisper) are reached over HTT
 
 1. Files are written to `WORKING_DIR` and a `job` row is created per file (`pending`).
 2. A background worker pulls each job, runs RAG-Anything parsing, then LightRAG ingestion under the **extraction** LLM phase (routes to `LLM_*`).
-3. After `ainsert` returns, the service **verifies** the document actually reached `processed` and — when the content is non-trivial and `RAG_REQUIRE_GRAPH_EXTRACTION=true` — that it produced graph entities. Only then is the job marked `processed`.
+3. After `ainsert` returns, the service **verifies** the document actually reached LightRAG's internal `processed` doc status and — when the content is non-trivial and `RAG_REQUIRE_GRAPH_EXTRACTION=true` — that it produced graph entities. Only then is the job marked `done` (the full job vocabulary is in the [API reference](api-reference.md#ingest-job-statuses-canonical-list)).
 4. File identity, content hash, doc id, and the extracting model are recorded for later listing/deletion.
 
 **Query** (`POST /workspace/{id}/query`):

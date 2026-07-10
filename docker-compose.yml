@@ -44,7 +44,7 @@ services:
       # PostgreSQLDB overrides every per-instance workspace= arg, collapsing all workspaces
       # onto one and breaking multi-project isolation. Absent, each LightRAG instance keeps
       # its own workspace and the rag_workspaces registry drives namespacing. The server
-      # falls back to "default" for the primary workspace's physical name.
+      # falls back to "default" for the bootstrap `default` workspace's physical name (seed-only).
 
       # --- Text LLM: entity/relationship extraction (ingest) ---
       LLM_MODEL: ${LLM_MODEL:-gpt-5.4-mini}

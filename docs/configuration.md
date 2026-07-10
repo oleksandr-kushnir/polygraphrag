@@ -39,7 +39,8 @@ Any `QUERY_LLM_*` variable left blank falls back to the corresponding `LLM_*` va
 | `POSTGRES_USER` | `raguser` | Role name. |
 | `POSTGRES_PORT` | `5432` | Host port (bound to loopback). |
 | `POSTGRES_HOST` | `postgres` | Set by compose to the DB service name (`postgres`). |
-| `POSTGRES_WORKSPACE` | `default` | Physical LightRAG namespace backing the bootstrap `default` workspace, seeded only into an empty registry on first boot. |
+| `POSTGRES_DATABASE` | _(compose sets it to `POSTGRES_DB`)_ | Database name as read by **LightRAG's** PG storage layer (the server itself reads `POSTGRES_DB`). Compose sets both to the same value; when running outside compose (bare `uvicorn`), you must set both. |
+| `POSTGRES_WORKSPACE` | `default` | Physical LightRAG namespace backing the bootstrap `default` workspace, read **only** to seed that row on first boot into an empty registry. ⚠️ **Never set it in the container/server environment**: if present, LightRAG's process-wide PostgreSQLDB overrides every per-instance `workspace=`, collapsing all workspaces onto one and breaking multi-project isolation (see the warnings in `.env.example` and `docker-compose.yml`, which deliberately do not pass it in). |
 
 ### Text LLM
 
@@ -87,6 +88,8 @@ Any `QUERY_LLM_*` variable left blank falls back to the corresponding `LLM_*` va
 | `WORKING_DIR` | `/app/data` | On-disk root for uploaded files (a Docker volume). |
 | `MAX_RETRIES` | `5` | Ingestion retry budget. |
 | `RAG_REQUIRE_GRAPH_EXTRACTION` | `true` | Fail an ingest if a non-trivial document produced zero graph entities. |
+| `RAG_MIN_CONTENT_FOR_ENTITIES` | `200` | Minimum content length (chars) for the zero-entities guard above to apply; shorter documents aren't required to produce entities. |
+| `RAG_FILTER_TOPK_BOOST` | `5` | Multiplier applied to the retrieval budget (`top_k` / `max_nodes`) when a `file_path_contains` filter is active, so post-retrieval filtering of a narrow folder still has candidates. |
 | `RAG_PORT` | `9622` | Host port for the API (loopback). |
 | `API_TOKENS` | _(empty ⇒ no auth)_ | Comma-separated tokens gating every endpoint except `/health`. See **Auth** below. |
 | `LOG_LEVEL` | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR`. `DEBUG` logs LightRAG/RAG-Anything prompt + document content — keep at `INFO` normally. |

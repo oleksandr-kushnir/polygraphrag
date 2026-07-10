@@ -35,7 +35,7 @@ Create a new isolated workspace.
 `id` doubles as the storage namespace. Returns the created workspace.
 
 ### `GET /all-workspaces/list`
-List all active workspaces.
+List all active workspaces. Pass `?deleted=true` to list soft-deleted workspaces instead.
 
 ### `GET /workspace/{id}`
 Overview of one workspace: active/soft-deleted state, document counts by status, chunk count, distinct entity/relationship counts, and an ingest-job summary.
@@ -68,14 +68,25 @@ curl -X POST localhost:9622/workspace/acme/upload/batch \
   -F 'metadata=[{"description":"employee handbook"}]'
 ```
 
+### Ingest-job statuses (canonical list)
+
+An ingest job's `status` is one of:
+
+`pending` → `processing` → (`retrying`) → **`done`** | **`failed`**, plus **`save_failed`** when the uploaded bytes couldn't be written before processing started.
+
+> **Note:** this is the *job* status. LightRAG's internal per-*document* status
+> (`lightrag_doc_status`, surfaced in the `GET /workspace/{id}` overview under
+> `documents.by_status`) is a different vocabulary that includes `processed` — don't
+> poll a job for `processed`; a finished job is `done`.
+
 ### `GET /workspace/{id}/status/{job_id}`
-Status of one ingest job: `pending` → `processing` → `processed` / `failed` (with error and attempt count).
+Status of one ingest job (see the canonical status list above), with error and attempt count.
 
 ### `GET /workspace/{id}/batch/{batch_id}`
 Status of every job in a batch.
 
 ### `GET /workspace/{id}/jobs`
-List recent ingest jobs for the workspace.
+List the 100 most recent ingest jobs for the workspace, newest first.
 
 ---
 
@@ -89,11 +100,11 @@ Remove one file's document, chunks, and the entities/relationships sourced **onl
 
 ```json
 { "doc_id": "doc-<md5>" }          // most precise
-{ "external_path": "/data/corpus/sub/handbook.pdf" }
+{ "external_path": "/data/corpus/sub/handbook.pdf" }   // the real path recorded at upload (path_root/source_path)
 { "rel_path": "sub/handbook.pdf" }
 ```
 
-Entities shared with other documents are preserved (only solely-sourced entities are removed). The document's LLM cache is always cleared. **Idempotent** — deleting an absent file returns a `noop`.
+Entities shared with other documents are preserved (only solely-sourced entities are removed). The document's LLM cache is always cleared. **Idempotent** — deleting an absent file returns a `noop`; a body with none of the three identifiers is rejected with `422`.
 
 ---
 
@@ -132,3 +143,13 @@ Useful for building your own UI, debugging retrieval, or feeding another pipelin
 
 ### `GET /workspace/{id}/graph.html`
 Returns a self-contained interactive HTML page (built with [D3.js v7](https://d3js.org/), force layout drawn on an HTML canvas, D3 inlined) rendering the workspace's knowledge graph — open it directly in a browser. Supports optional filtering by file-path substring so you can focus on one folder's subgraph.
+
+Query parameters:
+
+| Param | Default | Meaning |
+|---|---|---|
+| `node_label` | `*` | Entity name to center the subgraph on; `*` renders the entire graph. |
+| `max_depth` | `3` | Maximum relationship hops expanded out from the starting node(s). |
+| `max_nodes` | `5000` | Hard cap on rendered nodes; closest / highest-degree nodes win when truncated. |
+| `physics` | `true` | Animated force-directed layout; set `false` for a static layout on large graphs. |
+| `file_path_contains` | _(empty)_ | Repeatable case-insensitive substring filter on node `file_path` (OR semantics); empty = whole graph. |
