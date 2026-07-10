@@ -144,29 +144,37 @@ def _wait_batch(client: httpx.Client, ws: str, batch_id: str) -> bool:
     return False
 
 
-def _response_text(client: httpx.Client, ws: str, query: str) -> str:
-    """Return the full /query/data JSON (as a string) for substring sentinel checks."""
+def _retrieved_text(client: httpx.Client, ws: str, query: str) -> str:
+    """Return ONLY the retrieved `data` payload (entities/relationships/chunks/references) of
+    /query/data, serialized for substring sentinel checks.
+
+    We deliberately exclude the response's top-level `status`/`message`/`metadata`, because the
+    service echoes the query text there — so a query that names the *other* workspace's sentinel
+    would appear at the top level even with perfect isolation. The isolation invariant is strictly
+    about *retrieved corpus data*, which lives under `data`.
+    """
     r = client.post(
         f"{BASE}/workspace/{ws}/query/data",
         json={"query": query, "mode": "mix", "top_k": 40},
     )
     if r.status_code != 200:
         return ""
-    return json.dumps(r.json())
+    return json.dumps(r.json().get("data", {}))
 
 
 def _assert_isolation(client: httpx.Client) -> None:
     """The core invariant: each workspace retrieves ONLY its own data, never the other's."""
     # Ask each workspace about ITS OWN topic → its own sentinel should be retrievable.
-    a_own = _response_text(client, WS_A, f"Tell me about {TOPIC_A}")
-    b_own = _response_text(client, WS_B, f"Tell me about {TOPIC_B}")
+    a_own = _retrieved_text(client, WS_A, f"Tell me about {TOPIC_A}")
+    b_own = _retrieved_text(client, WS_B, f"Tell me about {TOPIC_B}")
     check(f"{WS_A} retrieves its own sentinel {SENT_A}", SENT_A in a_own)
     check(f"{WS_B} retrieves its own sentinel {SENT_B}", SENT_B in b_own)
 
-    # Hard cross-contamination check: ask each workspace directly about the OTHER's topic.
-    # If isolation holds, the other's sentinel must never appear — even under a leading query.
-    a_cross = _response_text(client, WS_A, f"Tell me about {TOPIC_B} and {SENT_B}")
-    b_cross = _response_text(client, WS_B, f"Tell me about {TOPIC_A} and {SENT_A}")
+    # Hard cross-contamination check: ask each workspace directly about the OTHER's topic AND
+    # sentinel by name. If isolation holds, the other's data can never be *retrieved* here — the
+    # sentinel is absent from the retrieved `data` even under this leading query.
+    a_cross = _retrieved_text(client, WS_A, f"Tell me about {TOPIC_B} and {SENT_B}")
+    b_cross = _retrieved_text(client, WS_B, f"Tell me about {TOPIC_A} and {SENT_A}")
     check(f"{WS_A} does NOT leak {WS_B}'s sentinel {SENT_B}", SENT_B not in a_cross, "cross-talk!")
     check(f"{WS_B} does NOT leak {WS_A}'s sentinel {SENT_A}", SENT_A not in b_cross, "cross-talk!")
 
@@ -194,7 +202,7 @@ def _purge(client: httpx.Client, ws: str) -> None:
 
 def main() -> int:
     print(f"PolyGraphRAG live ISOLATION test  ->  {BASE}")
-    print(f"workspaces: {WS_A} (⇒{SENT_A})  vs  {WS_B} (⇒{SENT_B})")
+    print(f"workspaces: {WS_A} (-> {SENT_A})  vs  {WS_B} (-> {SENT_B})")
     print("=" * 60)
 
     with httpx.Client(headers=HEADERS, timeout=60.0) as client:
