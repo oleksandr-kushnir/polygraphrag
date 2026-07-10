@@ -2,8 +2,10 @@ name: polygraphrag
 
 services:
   postgres:
+    # Pull the prebuilt image with `docker compose pull`, or build locally with
+    # `docker compose up --build`. Same name either way, so both paths just work.
     build: ./db
-    image: polygraphrag-postgres:local
+    image: ghcr.io/oleksandr-kushnir/polygraphrag-postgres:latest
     container_name: polygraphrag-postgres
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-ragdb}
@@ -25,7 +27,7 @@ services:
 
   polygraphrag:
     build: .
-    image: polygraphrag:local
+    image: ghcr.io/oleksandr-kushnir/polygraphrag:latest
     container_name: polygraphrag
     depends_on:
       postgres:

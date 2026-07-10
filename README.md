@@ -95,9 +95,13 @@ PolyGraphRAG's storage backend **is** Postgres (pgvector + Apache AGE + pg_trgm)
 
 ```bash
 cp .env.example .env          # set POSTGRES_PASSWORD + at least one API key
-docker compose up -d --build  # builds Postgres(+AGE) and the API, starts both
+docker compose pull           # fetch prebuilt images from GHCR (fast path)
+docker compose up -d          # start Postgres(+AGE) and the API
 curl localhost:9622/health    # -> {"status":"ok"}
 ```
+
+Prefer to build the images yourself (e.g. after changing the code)? Swap the middle
+two commands for `docker compose up -d --build`.
 
 Open **http://localhost:9622/docs** for the full interactive Swagger UI.
 
