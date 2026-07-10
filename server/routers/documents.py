@@ -346,13 +346,15 @@ async def _resolve_doc_for_delete(
         "entities/relationships sourced **only** by it. Identify the file by `doc_id` (most precise), "
         "`external_path` (matched against the stored LightRAG file path), or `rel_path` (matched against "
         "the stored source path). The LLM cache for the document is **always cleared** so no outdated "
-        "extraction lingers. **Idempotent:** deleting a file that isn't present returns `noop`.\n\n"
+        "extraction lingers. **Idempotent:** deleting a file that isn't present returns `noop`; a body "
+        "with none of the three identifiers is rejected with 422.\n\n"
         "Note on shared entities: an entity that appears in several files is one merged graph node; this "
         "deletes only entities sourced solely by this file — entities still referenced by other files "
         "correctly survive. The deletion completes before the response returns."
     ),
     responses={
         404: {"description": "Workspace not found or soft-deleted"},
+        422: {"description": "No identifier given (doc_id / external_path / rel_path)"},
         503: {"description": "Database not initialised yet"},
     },
 )

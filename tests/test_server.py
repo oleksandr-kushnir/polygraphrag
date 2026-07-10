@@ -2578,6 +2578,20 @@ async def test_delete_file_noop_when_not_found(client):
 
 
 @pytest.mark.asyncio
+async def test_delete_file_empty_body_422(client):
+    """A body with no identifier at all is a client error (422), not a silent noop — a
+    misspelled field name must not read as success."""
+    pool = MagicMock()
+    pool.fetchrow = AsyncMock(return_value=None)
+    server._db_pool = pool
+    for body in ({}, {"path": "typo-field.txt"}, {"doc_id": None}):
+        resp = await client.request("DELETE", f"{WS}/file/delete", json=body)
+        assert resp.status_code == 422, body
+        assert "doc_id" in resp.text  # error names the accepted identifiers
+    pool.fetchrow.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_delete_file_by_rel_path_resolves(client):
     pool = MagicMock()
     # first lookup (file_path) misses, second (source_path) hits

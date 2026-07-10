@@ -7,7 +7,7 @@ and lets the routers import a stable schema surface.
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 _MODE_DESC = (
     "Retrieval mode: 'mix' (default, graph + vector — recommended), 'local' (entity-centric), "
@@ -96,3 +96,13 @@ class FileDeleteRequest(BaseModel):
     doc_id: str | None = Field(
         None, description="LightRAG doc id (`doc-<md5>`). If given, used directly — most precise."
     )
+
+    @model_validator(mode="after")
+    def _require_one_identifier(self) -> "FileDeleteRequest":
+        """Absent *file* → noop is right; absent *identifier* is a client error. Without this,
+        a misspelled field name would read as silent success."""
+        if not (self.doc_id or self.external_path or self.rel_path):
+            raise ValueError(
+                "Provide at least one identifier: doc_id, external_path, or rel_path."
+            )
+        return self
