@@ -1704,6 +1704,34 @@ async def test_graph_html_no_filter_no_boost(client):
     assert "https://d3js.org" in resp.text  # inlined D3 bundle's header comment
 
 
+@pytest.mark.asyncio
+async def test_graph_html_max_nodes_cap_reapplied_after_filter(client):
+    """max_nodes is a hard cap: the boosted fetch for a path filter must be truncated back after
+    filtering, keeping LightRAG's priority order (closest/highest-degree first)."""
+
+    def _node(nid):
+        return SimpleNamespace(
+            id=nid,
+            properties={"file_path": "/opt/data/career/cv.pdf", "entity_id": nid},
+            labels=["E"],
+        )
+
+    kg = SimpleNamespace(nodes=[_node(f"match_{i}") for i in range(5)], edges=[])
+    gkg = AsyncMock(return_value=kg)
+    orig = rag_stub.lightrag.get_knowledge_graph
+    rag_stub.lightrag.get_knowledge_graph = gkg
+    try:
+        resp = await client.get(
+            f"{WS}/graph.html", params={"file_path_contains": "/career/", "max_nodes": 2}
+        )
+    finally:
+        rag_stub.lightrag.get_knowledge_graph = orig
+    assert resp.status_code == 200
+    # First two (highest-priority) matches kept, the rest truncated.
+    assert "match_0" in resp.text and "match_1" in resp.text
+    assert "match_2" not in resp.text and "match_4" not in resp.text
+
+
 # --------------------------------------------------------------------------- #
 # _split_if_csv — per-file metadata from comma-separated form fields
 # --------------------------------------------------------------------------- #

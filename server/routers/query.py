@@ -218,5 +218,5 @@ async def graph_html(
     if needles:
         kg.nodes = [
             n for n in kg.nodes if _path_matches_any((n.properties or {}).get("file_path"), needles)
-        ]
+        ][:max_nodes]  # re-apply the hard cap after the boosted fetch; priority order preserved
     return HTMLResponse(_build_graph_html(kg, physics))
