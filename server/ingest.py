@@ -206,7 +206,7 @@ async def _process_file_impl(
     rag_instance: RAGAnything,
     description_text: str = "",
     file_path: str | None = None,
-) -> str | None:
+) -> tuple[str | None, str | None]:
     suffix = path.suffix.lower()
     if suffix in _VISION_SUFFIXES:
         text = await _extract_with_vision(path)
