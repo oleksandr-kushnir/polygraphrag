@@ -124,22 +124,68 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     font-size: 11px; color: #888; pointer-events: none;
   }
+  #legend {
+    position: fixed; bottom: 12px; right: 12px; z-index: 10;
+    max-height: 45vh; overflow-y: auto;
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 12px; color: #eaeaea;
+    padding: 9px 12px;
+    border-radius: 6px;
+    background-color: rgba(43,43,43,0.9);
+    border: 1px solid #555;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.45);
+  }
+  #legend .legend-title {
+    font-size: 11px; color: #999; text-transform: uppercase;
+    letter-spacing: 0.05em; margin-bottom: 6px;
+  }
+  #legend .legend-item {
+    display: flex; align-items: center; gap: 7px; line-height: 1.7;
+  }
+  #legend .legend-swatch {
+    width: 11px; height: 11px; border-radius: 50%;
+    flex: 0 0 auto; border: 1px solid rgba(0,0,0,0.4);
+  }
 </style>
 </head>
 <body>
 <canvas id="graph"></canvas>
 <div id="tooltip"></div>
 <div id="hint">scroll to zoom · drag background to pan · drag a node to move it · hover for details</div>
+<div id="legend"></div>
 <script>__D3_SOURCE__</script>
 <script>
 const DATA = __DATA_JSON__;
 const PHYSICS = __PHYSICS__;
+const LEGEND = __LEGEND_JSON__;
 const nodes = DATA.nodes;
 const links = DATA.links;
 
 const canvas = document.getElementById("graph");
 const ctx = canvas.getContext("2d");
 const tooltip = document.getElementById("tooltip");
+
+// --- Legend (entity type -> node color) ---
+(function buildLegend() {
+  const el = document.getElementById("legend");
+  if (!LEGEND || !LEGEND.length) { el.style.display = "none"; return; }
+  const title = document.createElement("div");
+  title.className = "legend-title";
+  title.textContent = "Entity type";
+  el.appendChild(title);
+  for (const entry of LEGEND) {
+    const row = document.createElement("div");
+    row.className = "legend-item";
+    const swatch = document.createElement("span");
+    swatch.className = "legend-swatch";
+    swatch.style.backgroundColor = entry.color;
+    const label = document.createElement("span");
+    label.textContent = entry.label;
+    row.appendChild(swatch);
+    row.appendChild(label);
+    el.appendChild(row);
+  }
+})();
 
 let dpr = window.devicePixelRatio || 1;
 let width = window.innerWidth;
@@ -371,14 +417,19 @@ def _build_graph_html(kg, physics: bool) -> str:
                 }
             )
 
+    # Legend entries (entity type -> color), in the same sorted order as the color mapping.
+    legend = [{"label": t, "color": color_of[t]} for t in types]
+
     # Script-safe embedding: neutralize any "</..." that could close the <script> element early.
     data_json = json.dumps({"nodes": nodes, "links": links}).replace("</", "<\\/")
+    legend_json = json.dumps(legend).replace("</", "<\\/")
 
     # Fill the small placeholders first, then insert the large D3/data blobs, so a later
     # replace can never match a token that happens to occur inside embedded content.
     return (
         _HTML_TEMPLATE.replace("__PHYSICS__", "true" if physics else "false")
         .replace("__BGCOLOR__", _BGCOLOR)
+        .replace("__LEGEND_JSON__", legend_json)
         .replace("__DATA_JSON__", data_json)
         .replace("__D3_SOURCE__", _d3_source())
     )

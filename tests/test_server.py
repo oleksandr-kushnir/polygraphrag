@@ -6,7 +6,9 @@ Tests for server.py — run inside the container:
 
 import asyncio
 import io
+import json
 import logging
+import re
 
 # --------------------------------------------------------------------------- #
 # Minimal stubs so server.py can be imported without real Postgres / OpenAI
@@ -1769,6 +1771,69 @@ async def test_graph_html_max_nodes_cap_reapplied_after_filter(client):
     # First two (highest-priority) matches kept, the rest truncated.
     assert "match_0" in resp.text and "match_1" in resp.text
     assert "match_2" not in resp.text and "match_4" not in resp.text
+
+
+def _extract_js_blob(html: str, var: str, terminator: str):
+    """Pull an embedded `const <var> = <json>;` blob out of the graph.html page and parse it.
+    The renderer escapes `</` as `<\\/` for script-safety; JSON's `\\/` escape decodes back to `/`."""
+    m = re.search(rf"const {var} = (.+?);\n{terminator}", html, re.S)
+    assert m, f"{var} blob not found in graph.html"
+    return json.loads(m.group(1))
+
+
+@pytest.mark.asyncio
+async def test_graph_html_legend_matches_node_colors(client):
+    """The bottom-right legend lists every entity type once, and each swatch color is exactly the
+    color used for that type's nodes (both derive from the same type→color mapping)."""
+
+    def _node(nid, etype):
+        return SimpleNamespace(
+            id=nid, properties={"entity_type": etype, "entity_id": nid}, labels=["E"]
+        )
+
+    kg = SimpleNamespace(
+        nodes=[_node("Alice", "Person"), _node("Bob", "Person"), _node("Acme", "Org")],
+        edges=[SimpleNamespace(source="Alice", target="Acme", properties={})],
+    )
+    gkg = AsyncMock(return_value=kg)
+    orig = rag_stub.lightrag.get_knowledge_graph
+    rag_stub.lightrag.get_knowledge_graph = gkg
+    try:
+        resp = await client.get(f"{WS}/graph.html")
+    finally:
+        rag_stub.lightrag.get_knowledge_graph = orig
+    assert resp.status_code == 200
+    assert 'id="legend"' in resp.text  # the panel element is rendered
+
+    legend = _extract_js_blob(resp.text, "LEGEND", "const nodes")
+    nodes = _extract_js_blob(resp.text, "DATA", "const PHYSICS")["nodes"]
+
+    # One entry per distinct entity type, each a distinct color.
+    assert sorted(e["label"] for e in legend) == ["Org", "Person"]
+    legend_color = {e["label"]: e["color"] for e in legend}
+    assert len(set(legend_color.values())) == 2
+
+    # Node colors match their type's legend swatch: both Person nodes share the Person color,
+    # the Org node uses the Org color, and the two colors differ.
+    node_color = {n["label"]: n["color"] for n in nodes}
+    assert node_color["Alice"] == node_color["Bob"] == legend_color["Person"]
+    assert node_color["Acme"] == legend_color["Org"]
+    assert node_color["Alice"] != node_color["Acme"]
+
+
+@pytest.mark.asyncio
+async def test_graph_html_legend_empty_when_no_nodes(client):
+    """An empty graph yields an empty legend array; the client-side script then hides the panel."""
+    kg = SimpleNamespace(nodes=[], edges=[])
+    gkg = AsyncMock(return_value=kg)
+    orig = rag_stub.lightrag.get_knowledge_graph
+    rag_stub.lightrag.get_knowledge_graph = gkg
+    try:
+        resp = await client.get(f"{WS}/graph.html")
+    finally:
+        rag_stub.lightrag.get_knowledge_graph = orig
+    assert resp.status_code == 200
+    assert _extract_js_blob(resp.text, "LEGEND", "const nodes") == []
 
 
 # --------------------------------------------------------------------------- #
