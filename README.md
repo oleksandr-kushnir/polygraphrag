@@ -33,6 +33,12 @@ PolyGraphRAG wraps [RAG-Anything](https://github.com/HKUDS/RAG-Anything) and [Li
 
 **One pipeline, one store, one query surface.** The extracted text is embedded into **pgvector** for semantic retrieval, and its entities/relationships are lifted into an **Apache AGE knowledge graph** — so queries traverse both the vectors *and* the graph, not just chunk similarity. Point it at a PDF, a screenshot, a spreadsheet, or a voice memo; the plumbing is already done.
 
+<p align="center">
+  <img alt="Interactive knowledge-graph viewer for a workspace" src="docs/images/workspace_graph.png" width="100%">
+  <br>
+  <em>The extracted knowledge graph for a workspace, rendered by the built-in interactive viewer.</em>
+</p>
+
 ---
 
 ## 🔀🤖 The perfect memory & knowledge backend for n8n workflows and AI agents
