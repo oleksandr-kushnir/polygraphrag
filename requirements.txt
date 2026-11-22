@@ -18,6 +18,7 @@ mineru>=3.1.0
 
 # Web layer
 fastapi
+mcp>=1.30,<2
 uvicorn[standard]
 python-multipart
 

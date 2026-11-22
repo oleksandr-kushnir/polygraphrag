@@ -5,6 +5,7 @@ Tests for server.py — run inside the container:
 """
 
 import asyncio
+import gzip
 import io
 import json
 import logging
@@ -88,6 +89,8 @@ sys.modules.setdefault("lightrag", lightrag_mod)
 sys.modules.setdefault("lightrag.utils", lightrag_utils_mod)
 
 import server  # noqa: E402 — must come after stubs
+from server.compression import NegotiatedGZip
+from server.mcp_viewer import validate_viewer_base_url
 
 # --------------------------------------------------------------------------- #
 # Fixtures
@@ -98,6 +101,123 @@ _mock_pool.execute = AsyncMock()
 _mock_pool.fetch = AsyncMock(return_value=[])
 _mock_pool.fetchrow = AsyncMock(return_value=None)
 _mock_pool.close = AsyncMock()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "/relative",
+        "ftp://example.org",
+        "http:///missing-host",
+        "https://u:p@example.org",
+        "https://@example.org",
+        "https://example.org/rag?",
+        "https://example.org/rag#",
+    ],
+)
+def test_mcp_viewer_base_rejects_invalid_urls(value):
+    with pytest.raises(ValueError, match="MCP_VIEWER_BASE_URL"):
+        validate_viewer_base_url(value)
+
+
+@pytest.mark.parametrize(
+    ("encodings", "size", "compress"),
+    [
+        ([], 1024, False),
+        ([b""], 1024, False),
+        ([b"gzip"], 1023, False),
+        ([b"gzip"], 1024, True),
+        ([b"gZiP"], 1024, True),
+        ([b"gzip;q=0, *;q=1"], 1024, False),
+        ([b"gzip;q=0.4", b"identity;q=0.8"], 1024, False),
+        ([b"gzip;q=0.8", b"identity;q=0.4"], 1024, True),
+        ([b"gzip;q=0.8, identity;q=0.8"], 1024, True),
+        ([b"gzip", b"*;q=0"], 20, True),
+        ([b"identity;q=0, gzip"], 0, False),
+    ],
+)
+async def test_negotiated_gzip_raw_headers(encodings, size, compress):
+    sent = []
+    body = b"x" * size
+
+    async def send(message):
+        sent.append(message)
+
+    async def receive():
+        raise AssertionError("Compression should not consume the request")
+
+    async def responder(scope, receive, send):
+        assert scope["headers"] == [(b"accept-encoding", value) for value in encodings]
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(size).encode()),
+                    (b"vary", b"Origin"),
+                    (b"vary", b"Accept-Language, origin"),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+    scope = {"type": "http", "headers": [(b"accept-encoding", value) for value in encodings]}
+    await NegotiatedGZip(responder)(scope, receive, send)
+    headers = sent[0]["headers"]
+    actual = sent[1]["body"]
+    assert (
+        (b"content-encoding", b"gzip") in headers
+        if compress
+        else (b"content-encoding", b"gzip") not in headers
+    )
+    assert (gzip.decompress(actual) if compress else actual) == body
+    assert dict(headers)[b"content-length"] == str(len(actual)).encode()
+    if size:
+        vary = [value for key, value in headers if key == b"vary"]
+        assert len(vary) == 1
+        assert set(vary[0].lower().split(b", ")) == {
+            b"accept-encoding",
+            b"origin",
+            b"accept-language",
+        }
+
+
+@pytest.mark.parametrize(
+    ("headers", "pass_through"),
+    [
+        ([(b"content-type", b"text/event-stream; charset=utf-8")], True),
+        ([(b"content-type", b"text/html"), (b"content-encoding", b"br")], True),
+        ([(b"content-type", b"text/html"), (b"vary", b"Origin"), (b"vary", b"*")], False),
+    ],
+)
+async def test_negotiated_gzip_sse_preencoded_and_wildcard_vary(headers, pass_through):
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    async def receive():
+        raise AssertionError("Compression should not consume the request")
+
+    async def responder(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": list(headers)})
+        if pass_through:
+            assert sent[0]["headers"] == headers
+            await send(
+                {"type": "http.response.body", "body": b"data: first\n\n", "more_body": True}
+            )
+            assert sent[1]["body"] == b"data: first\n\n"
+        await send({"type": "http.response.body", "body": b"x" * 2048})
+
+    await NegotiatedGZip(responder)(
+        {"type": "http", "headers": [(b"accept-encoding", b"gzip")]}, receive, send
+    )
+    if pass_through:
+        assert sent[-1]["body"] == b"x" * 2048
+    else:
+        assert [value for key, value in sent[0]["headers"] if key == b"vary"] == [b"*"]
+        assert gzip.decompress(sent[-1]["body"]) == b"x" * 2048
 
 
 @pytest.fixture(autouse=True)
@@ -139,6 +259,30 @@ def reset_server_state():
 
 # Default public workspace used by data-endpoint tests (maps to physical 'default').
 WS = "/workspace/alex"
+
+
+@pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer wrong"}])
+async def test_mcp_requires_configured_token(client, headers):
+    server.API_TOKENS = ["test-mcp-token"]
+    response = await client.post(
+        "/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, headers=headers
+    )
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({"Host": "unknown.example:9622"}, 421),
+        ({"Host": "polygraphrag:9622", "Origin": "https://unknown.example"}, 403),
+    ],
+)
+async def test_mcp_rejects_untrusted_host_or_origin(client, headers, expected, monkeypatch):
+    manager = server.create_session_manager()
+    monkeypatch.setattr(server.app.state, "mcp_manager", manager, raising=False)
+    async with manager.run():
+        response = await client.post("/mcp", json={}, headers=headers)
+        assert response.status_code == expected
 
 
 async def _fake_lookup_workspace(workspace_id):
@@ -185,7 +329,9 @@ def _fake_upload(filename: str, content: bytes = b"hello") -> dict:
 async def test_routes_pdf_to_vision(tmp_path):
     path = tmp_path / "doc.pdf"
     path.write_bytes(b"%PDF-1.4 test")
-    with patch.object(server.ingest, "_extract_with_vision", new=AsyncMock(return_value="text")) as m:
+    with patch.object(
+        server.ingest, "_extract_with_vision", new=AsyncMock(return_value="text")
+    ) as m:
         await server._process_file(path, rag_stub)
     m.assert_awaited_once_with(path)
 
@@ -195,7 +341,9 @@ async def test_routes_pdf_to_vision(tmp_path):
 async def test_routes_images_to_vision(tmp_path, ext):
     path = tmp_path / f"img{ext}"
     path.write_bytes(b"\x89PNG")
-    with patch.object(server.ingest, "_extract_with_vision", new=AsyncMock(return_value="text")) as m:
+    with patch.object(
+        server.ingest, "_extract_with_vision", new=AsyncMock(return_value="text")
+    ) as m:
         await server._process_file(path, rag_stub)
     m.assert_awaited_once()
 
@@ -205,7 +353,9 @@ async def test_routes_images_to_vision(tmp_path, ext):
 async def test_routes_audio_to_whisper(tmp_path, ext):
     path = tmp_path / f"audio{ext}"
     path.write_bytes(b"RIFF")
-    with patch.object(server.ingest, "_transcribe_audio", new=AsyncMock(return_value="transcript")) as m:
+    with patch.object(
+        server.ingest, "_transcribe_audio", new=AsyncMock(return_value="transcript")
+    ) as m:
         await server._process_file(path, rag_stub)
     m.assert_awaited_once_with(path)
 
@@ -220,7 +370,9 @@ async def test_routes_office_converts_then_vision(tmp_path, ext):
     fake_pdf.write_bytes(b"%PDF")
     with (
         patch.object(server.ingest, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)),
-        patch.object(server.ingest, "_extract_with_vision", new=AsyncMock(return_value="text")) as mv,
+        patch.object(
+            server.ingest, "_extract_with_vision", new=AsyncMock(return_value="text")
+        ) as mv,
     ):
         await server._process_file(path, rag_stub)
     mv.assert_awaited_once_with(fake_pdf)
@@ -252,7 +404,9 @@ async def test_office_temp_pdf_deleted_on_vision_error(tmp_path):
     with (
         patch.object(server.ingest, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)),
         patch.object(
-            server.ingest, "_extract_with_vision", new=AsyncMock(side_effect=RuntimeError("vision fail"))
+            server.ingest,
+            "_extract_with_vision",
+            new=AsyncMock(side_effect=RuntimeError("vision fail")),
         ),
     ):
         with pytest.raises(RuntimeError):
@@ -278,7 +432,9 @@ async def test_xlsx_under_10mb_proceeds(tmp_path):
     fake_pdf.write_bytes(b"%PDF")
     with (
         patch.object(server.ingest, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)),
-        patch.object(server.ingest, "_extract_with_vision", new=AsyncMock(return_value="text")) as mv,
+        patch.object(
+            server.ingest, "_extract_with_vision", new=AsyncMock(return_value="text")
+        ) as mv,
     ):
         await server._process_file(path, rag_stub)
     mv.assert_awaited_once()
@@ -293,7 +449,9 @@ async def test_xlsx_size_limit_only_applies_to_xlsx(tmp_path):
     fake_pdf.write_bytes(b"%PDF")
     with (
         patch.object(server.ingest, "_convert_office_to_pdf", new=AsyncMock(return_value=fake_pdf)),
-        patch.object(server.ingest, "_extract_with_vision", new=AsyncMock(return_value="text")) as mv,
+        patch.object(
+            server.ingest, "_extract_with_vision", new=AsyncMock(return_value="text")
+        ) as mv,
     ):
         await server._process_file(path, rag_stub)
     mv.assert_awaited_once()
@@ -1230,7 +1388,9 @@ async def test_query_references_enriched_from_db(client):
     assert ref["last_modified_time"] == "2026-04-01T10:00:00"
     assert ref["uploaded_at"] == "2026-05-08T12:34:56"
     assert ref["llm_model_extracted"] == "deepseek/deepseek-v4-flash"  # per-file extractor
-    assert ref["llm_model_answered"] == server.config.QUERY_LLM_MODEL  # current query-time answering model
+    assert (
+        ref["llm_model_answered"] == server.config.QUERY_LLM_MODEL
+    )  # current query-time answering model
     _mock_pool.fetch.return_value = []  # restore default
 
 
@@ -1522,8 +1682,14 @@ def test_path_matches_any_single_and_or_semantics():
 
 
 def test_path_matches_any_case_insensitive():
-    assert server.references._path_matches_any("/opt/Data/Workspace/Career/CV.pdf", ["/career/"]) is True
-    assert server.references._path_matches_any("/opt/data/workspace/career/cv.pdf", ["/CAREER/"]) is True
+    assert (
+        server.references._path_matches_any("/opt/Data/Workspace/Career/CV.pdf", ["/career/"])
+        is True
+    )
+    assert (
+        server.references._path_matches_any("/opt/data/workspace/career/cv.pdf", ["/CAREER/"])
+        is True
+    )
 
 
 def test_path_matches_any_empty_value_with_needles_is_no_match():
@@ -1775,7 +1941,8 @@ async def test_graph_html_max_nodes_cap_reapplied_after_filter(client):
 
 def _extract_js_blob(html: str, var: str, terminator: str):
     """Pull an embedded `const <var> = <json>;` blob out of the graph.html page and parse it.
-    The renderer escapes `</` as `<\\/` for script-safety; JSON's `\\/` escape decodes back to `/`."""
+    The renderer escapes `</` as `<\\/` for script-safety; JSON's `\\/` escape decodes back to `/`.
+    """
     m = re.search(rf"const {var} = (.+?);\n{terminator}", html, re.S)
     assert m, f"{var} blob not found in graph.html"
     return json.loads(m.group(1))
@@ -1805,7 +1972,7 @@ async def test_graph_html_legend_matches_node_colors(client):
     assert resp.status_code == 200
     assert 'id="legend"' in resp.text  # the panel element is rendered
 
-    legend = _extract_js_blob(resp.text, "LEGEND", "const nodes")
+    legend = _extract_js_blob(resp.text, "LEGEND", "renderGraph")
     nodes = _extract_js_blob(resp.text, "DATA", "const PHYSICS")["nodes"]
 
     # One entry per distinct entity type, each a distinct color.
@@ -1833,7 +2000,7 @@ async def test_graph_html_legend_empty_when_no_nodes(client):
     finally:
         rag_stub.lightrag.get_knowledge_graph = orig
     assert resp.status_code == 200
-    assert _extract_js_blob(resp.text, "LEGEND", "const nodes") == []
+    assert _extract_js_blob(resp.text, "LEGEND", "renderGraph") == []
 
 
 # --------------------------------------------------------------------------- #
@@ -1960,7 +2127,11 @@ async def test_db_init_drops_legacy_is_primary_column():
     joined = " ".join(str(c) for c in pool.execute.call_args_list)
     assert "DROP COLUMN IF EXISTS is_primary" in joined
     # The current schema no longer defines the column.
-    create = [str(c) for c in pool.execute.call_args_list if "CREATE TABLE IF NOT EXISTS rag_workspaces" in str(c)]
+    create = [
+        str(c)
+        for c in pool.execute.call_args_list
+        if "CREATE TABLE IF NOT EXISTS rag_workspaces" in str(c)
+    ]
     assert create and "is_primary" not in create[0]
 
 
@@ -2194,7 +2365,9 @@ async def test_soft_delete_sets_deleted_at(client):
 async def test_delete_any_workspace_succeeds(client):
     # No workspace is delete-protected anymore (the primary concept is gone) — even the seeded
     # `default` soft-deletes normally.
-    pool = _registry_pool(existing={"id": "default", "deleted_at": None, "lightrag_workspace": "default"})
+    pool = _registry_pool(
+        existing={"id": "default", "deleted_at": None, "lightrag_workspace": "default"}
+    )
     server._db_pool = pool
     resp = await client.delete("/workspace/default")
     assert resp.status_code == 200
@@ -2320,7 +2493,7 @@ async def test_purge_default_workspace_succeeds(client, tmp_path):
     assert resp.status_code == 200
     assert resp.json()["status"] == "purged"
     drops = [str(c) for c in pool._conn.execute.call_args_list if "drop_graph" in str(c)]
-    assert drops and "default_chunk_entity_relation" in drops[0]
+    assert drops == ["call(\"SELECT drop_graph('chunk_entity_relation', true)\")"]
     assert any("DELETE FROM rag_workspaces" in str(c) for c in pool.execute.call_args_list)
 
 
@@ -3318,7 +3491,9 @@ async def test_openapi_job_status_is_enum(client):
     """P3.4: the job status field is a machine-visible enum in the spec, not prose."""
     spec = (await client.get("/openapi.json")).json()
     status = spec["components"]["schemas"]["JobRecord"]["properties"]["status"]
-    enum = status.get("enum") or spec["components"]["schemas"].get(status.get("$ref", "").rsplit("/", 1)[-1], {}).get("enum")
+    enum = status.get("enum") or spec["components"]["schemas"].get(
+        status.get("$ref", "").rsplit("/", 1)[-1], {}
+    ).get("enum")
     assert set(enum or []) == {"pending", "processing", "retrying", "done", "failed", "save_failed"}
 
 

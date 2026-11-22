@@ -6,7 +6,7 @@ PolyGraphRAG is a thin, operational service layer over two libraries — **RAG-A
 
 | Component | Role |
 |---|---|
-| **`polygraphrag` (FastAPI)** | The HTTP API. Owns workspaces, ingest jobs, file metadata, and model-provider routing. Structured as the `server/` package (app assembly + `routers/` by resource + service modules). |
+| **`polygraphrag` (FastAPI)** | Serves REST and MCP on the same port. Owns workspaces, ingest jobs, file metadata, graph operations, and model-provider routing. |
 | **RAG-Anything** | Parses each uploaded file into text/structure (LibreOffice for Office docs, a vision model for PDFs/images, Whisper for audio) and drives ingestion. |
 | **LightRAG** | Chunks text, extracts entities/relationships with the LLM, merges them into a knowledge graph, and runs dual-level retrieval at query time. |
 | **Postgres** | Stores everything: the knowledge graph (**Apache AGE**), embeddings (**pgvector**), fuzzy-text indexes (**pg_trgm**), and PolyGraphRAG's own workspace/job/file metadata tables. |
@@ -30,6 +30,18 @@ External model providers (LLM, vision, embeddings, Whisper) are reached over HTT
 
 `POST /workspace/{id}/query/data` stops after step 2 and returns the structured evidence with no LLM answer.
 
+**MCP** (`POST /mcp`). PolyGraphRAG builds the tool catalog at startup. The MCP SDK serves
+that catalog on discovery and dispatches calls to the workspace, graph, query, and viewer
+operations shared with REST. The transport
+uses stateless Streamable HTTP and shares REST authentication. Graph edits are opt-in for
+MCP clients. [MCP tool reference](api-reference.md#mcp)
+
+**Manual graph edits.** The REST graph routes and opt-in MCP write tools commit manual
+facts directly to Postgres. The editable graph combines those facts with projected
+LightRAG records, retaining source evidence from both paths. Exact lookups, keyword reads,
+and traversal use the committed graph independently of embedding availability.
+[Manual graph guide](manual-graph-guide.md)
+
 ## Workspace isolation (multi-project)
 
 Isolation is the core design property: **each workspace is a separate graph and a separate vector namespace.**
@@ -48,6 +60,7 @@ Within one Postgres database:
 - **pgvector** — entity, relationship, and chunk embeddings in `lightrag_vdb_*_<model>_<dim>d` tables (the model+dim are in the table name, which is why they must stay stable).
 - **pg_trgm** — trigram indexes supporting fuzzy text matching.
 - **PolyGraphRAG tables** — `rag_workspaces` (registry) and `rag_file_metadata` (per-file system of record: content hash, doc id, stored path, extracting model, timestamps).
+- **Editable graph tables** — `rag_graph_records` stores manual and extracted facts with revisions and provenance. `rag_graph_vectors` tracks embeddings for effective graph records, and embedding jobs handle backfill across profile changes.
 
 The Postgres image (`db/Dockerfile`) is `pgvector/pgvector:pg16` with Apache AGE compiled from source; `db/init.sql` enables the three extensions on first boot.
 

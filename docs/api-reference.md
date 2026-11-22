@@ -1,6 +1,6 @@
 # API Reference
 
-Base URL in the default deployment: `http://localhost:9622`. Every endpoint is also documented interactively at **`/docs`** (Swagger UI) and **`/redoc`**.
+Base URL in the default deployment: `http://localhost:9622`. Browse the REST endpoints at **`/docs`** (Swagger UI) and **`/redoc`**. MCP clients discover tools at **`/mcp`**.
 
 All request/response bodies are JSON unless noted. File uploads use `multipart/form-data`.
 
@@ -18,12 +18,124 @@ loopback.
 ## Discovery & health
 
 ### `GET /`
-Service card: `{"name","version","docs":"/docs","openapi":"/openapi.json","health":"/health"}`. Gated by the same auth as the rest of the API.
+The service card includes the service name, version, and paths for `docs`, `openapi`, `health`, and `mcp`. Gated by the same auth as the rest of the API.
 
 ### `GET /health`
 Liveness probe. Returns `{"status":"ok"}`. Does not check the database. Never requires auth.
 
 ---
+
+## MCP
+
+Connect an agent to the knowledge graph at `http://localhost:9622/mcp` using **Streamable HTTP**.
+From a container on the same Compose network, use `http://polygraphrag:9622/mcp`. If
+`API_TOKENS` is set, send `Authorization: Bearer <token>`. The token grants service-wide access
+across REST and MCP.
+
+### Discover and call tools
+
+The client initializes a stateless MCP connection, discovers the catalog and JSON Schemas with
+`tools/list`, then invokes a tool by name with `tools/call`. All three operations go to
+`POST /mcp`. Swagger UI and `/openapi.json` document the REST endpoints. Clients can select
+individual tools to expose to an agent. That selection applies inside the client. The server
+enforces its own catalog and access rules.
+
+To try discovery and list active workspaces from Python, install the MCP SDK with
+`python -m pip install "mcp>=1.30,<2"`. Set `POLYGRAPHRAG_MCP_URL` to override the endpoint
+and `POLYGRAPHRAG_TOKEN` if authentication is enabled.
+
+```python
+import asyncio
+import os
+
+import httpx
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+
+
+async def main():
+    url = os.getenv("POLYGRAPHRAG_MCP_URL", "http://localhost:9622/mcp")
+    token = os.getenv("POLYGRAPHRAG_TOKEN")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    async with httpx.AsyncClient(headers=headers) as http:
+        async with streamable_http_client(url, http_client=http) as (reader, writer, _):
+            async with ClientSession(reader, writer) as mcp:
+                await mcp.initialize()
+                catalog = await mcp.list_tools()
+                print([tool.name for tool in catalog.tools])
+                result = await mcp.call_tool("list_workspaces", {})
+                if result.isError:
+                    raise RuntimeError(result.content)
+                print(result.structuredContent)
+
+
+asyncio.run(main())
+```
+
+### Read tools
+
+| Tool | Inputs | Result |
+|---|---|---|
+| `list_workspaces` | None | Active workspaces with public IDs, names and descriptions |
+| `search_workspace` | `workspace_id`, `query`, optional retrieval settings and `file_path_contains` | Entities, relationships, chunks and source references from the selected workspace |
+| `ask_workspace` | `workspace_id`, `query`, optional retrieval settings | A synthesized answer in `result` and its document `references` |
+| `get_workspace_overview` | `workspace_id` | Corpus, graph and ingest counts |
+| `get_ingest_job` | `workspace_id`, `job_id` | Job ID, status and attempt count |
+| `find_graph_entities` | `workspace_id`, optional filters, `limit` and `cursor` | Entity candidates and a continuation cursor |
+| `get_graph_entity` | `workspace_id`, `entity_id` | Entity fields, revision and provenance |
+| `get_graph_relationship` | `workspace_id`, `edge_id` | Relationship fields, direction, revision and provenance |
+| `get_graph_neighbors` | `workspace_id`, `entity_id`, optional traversal bounds and filters | Bounded entities and edges with a truncation flag |
+| `retrieve_graph` | `workspace_id`, `q` or `text`, optional seed and traversal settings | Ranked seeds, bounded subgraph, sources and embedding coverage |
+| `get_embedding_consistency` | `workspace_id` | Counts of indexed, missing and stale embeddings |
+| `show_workspace_graph` | `workspace_id`, optional viewer filters and `delivery` | Interactive graph, standalone HTML or browser link |
+
+The two corpus query tools accept the same `mode`, `top_k` and `include_references` settings as REST.
+Graph ID lookup, keyword search, traversal, the viewer and the consistency report work with model
+providers disabled. Use `retrieve_graph` in keyword mode for provider-free retrieval.
+An MCP tool error carries `isError: true`. Domain errors include JSON text with `status`, `code`
+and `message`, plus public details such as the current revision for a conflict. HTTP authentication
+failures return `401` before tool discovery or execution.
+
+### Opt-in graph edits
+
+Set `MCP_GRAPH_WRITES=true` and restart the API with the new setting to expose three additional
+tools to clients with API access. This switch applies to MCP graph edits across the deployment.
+Workspace management, file operations, graph deletion, merges, and embedding backfill are available
+through REST.
+
+| Tool | Inputs |
+|---|---|
+| `write_graph_batch` | `workspace_id` and the `entities` and `relationships` arrays from the REST batch contract |
+| `patch_graph_entity` | `workspace_id`, `entity_id`, `expected_revision` and fields to change |
+| `patch_graph_relationship` | `workspace_id`, `edge_id`, `expected_revision` and fields to change |
+
+Use a stable caller-owned ID for each new record. Batch writes are atomic. Patches keep omitted
+fields and accept null for clearing `source_ref`. On `revision_conflict`, reread the record before
+retrying. See the [manual graph guide](manual-graph-guide.md) for examples and provenance.
+
+### Graph viewer delivery
+
+`show_workspace_graph` accepts `node_label`, `max_depth`, `max_nodes`, `physics` and
+`file_path_contains` with the same defaults as the REST viewer.
+
+- `delivery="auto"` (default) returns a summary and the graph data for MCP Apps hosts. For
+  text clients, the summary includes a browser link when configured or explains how to request HTML.
+- `delivery="html"` returns the complete self-contained HTML as an embedded `text/html` resource
+  which clients can save as `graph.html`.
+- `delivery="link"` returns the live REST viewer URL. Set `MCP_VIEWER_BASE_URL` to an address the
+  user's browser can reach. The browser authenticates separately through the usual REST mechanism.
+
+Inline and HTML deliveries allow up to 5000 nodes and 1 MiB for the uncompressed MCP tool result.
+If the inline result is too large, the tool can return a configured link. Narrow the filters or
+lower `max_nodes` when an export exceeds the limit. Viewer URLs have an 8192-byte limit.
+
+### HTTP response compression
+
+REST and MCP negotiate gzip for buffered JSON and HTML of at least 1024 bytes. To request an
+uncompressed response, omit `Accept-Encoding` or send `Accept-Encoding: identity`. A gzip-only
+request can compress smaller bodies. If the request excludes both codings, the API returns an empty
+`406` before executing the operation. SSE and pre-encoded responses pass through. The graph viewer
+result limit is measured before HTTP compression.
 
 ## Workspaces (projects / graphs)
 
@@ -54,6 +166,27 @@ Soft-delete a workspace (recoverable). Any workspace can be deleted — all work
 Restore a soft-deleted workspace.
 
 ---
+
+## Manual graph and embedding operations
+
+All routes below start with `/workspace/{id}` and use the same authentication as the rest of the API. Each workspace exposes one graph. Connect a new manual relationship to an extracted entity by looking up the entity and using its returned ID. Exact, Boolean and keyword queries, graph writes and embedding inventories work with PostgreSQL alone. [Manual graph guide](manual-graph-guide.md)
+
+| Method and path | Behavior |
+|---|---|
+| `GET /graph/entities` | Search by `name`, Boolean `q`, and/or free `text`. Filter by `type` or `origin`. Use `match=exact` for literal equality and `sort=degree` for high-degree browsing. Returns `items`, `total`, and `next_cursor`. |
+| `GET/PUT/PATCH/DELETE /graph/entities/{entity_id}` | Read, create, replace, edit, or suppress an entity. Use the current `expected_revision` for edits and deletions. |
+| `GET/PUT/PATCH/DELETE /graph/relationships/{edge_id}` | Use endpoint IDs in `source` and `target`. Distinct relationship IDs preserve parallel and reverse edges. |
+| `POST /graph/batch` | Apply an atomic payload containing `entities` and/or `relationships` arrays. Each item has an `id`. |
+| `GET /graph/entities/{entity_id}/neighbors` | Traverse by ID with `hops`, `direction`, `relationship_type`, and `max_nodes`. |
+| `POST /graph/retrieve` | Retrieve ranked entity or relationship seeds plus a bounded neighborhood with sources and indexing coverage. `mode` accepts `keyword`, `semantic`, or `hybrid`. The latter two require `text` and an embedding provider. |
+| `POST /graph/entities/merge/preview`, `POST /graph/entities/merge/apply` | Merge explicitly selected duplicates, review conflicts and rewiring, and apply with a preview token. |
+| `GET /embeddings/missing` | Page through records with `state=missing\|stale\|needs_embedding`. Filter by `kind` or `origin`. The total counts all current matches before pagination. |
+| `POST /embeddings/backfill`, `GET /embeddings/backfill/{job_id}` | Trigger or poll indexing for the configured profile. The trigger returns `202`. |
+| `GET /embeddings/consistency` | Report ready, missing, stale and orphaned vectors by record kind. |
+
+Boolean expressions accept uppercase `AND` and `OR`, parentheses, and quoted phrases. For example, `(type:Team OR name:"Alice Chen") AND description:payments`. Supply the same filters with the returned cursor to read the next page. The graph retrieval response reports coverage for the selected seed kind across the workspace. With semantic or hybrid ranking, degree acts as a tie-breaker when requested.
+
+Validation errors return `422`. Revision conflicts return `409`. Provider-dependent requests return `503` with `detail.code` set to `provider_not_configured` or `provider_unavailable` and `detail.roles` identifying the required capability.
 
 ## Ingestion
 
@@ -257,4 +390,4 @@ Query parameters:
 | `max_depth` | `3` | Maximum relationship hops expanded out from the starting node(s). |
 | `max_nodes` | `5000` | Hard cap on rendered nodes; closest / highest-degree nodes win when truncated. |
 | `physics` | `true` | Animated force-directed layout; set `false` for a static layout on large graphs. |
-| `file_path_contains` | _(empty)_ | Repeatable case-insensitive substring filter on node `file_path` (OR semantics); empty = whole graph. |
+| `file_path_contains` | _(empty)_ | Repeatable case-insensitive substring filter on node and relationship source paths (OR semantics). An empty filter returns the whole graph. |

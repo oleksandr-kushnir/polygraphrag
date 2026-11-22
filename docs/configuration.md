@@ -57,12 +57,14 @@ Any `QUERY_LLM_*` variable left blank falls back to the corresponding `LLM_*` va
 
 | Variable | Default | Notes |
 |---|---|---|
-| `EMBEDDING_MODEL` | `text-embedding-3-small` | ⚠️ Names the vector tables. |
-| `EMBEDDING_DIM` | `1536` | ⚠️ Names the vector tables. |
+| `EMBEDDING_MODEL` | `text-embedding-3-small` | Model name in the embedding profile. |
+| `EMBEDDING_DIM` | `1536` | Expected number of dimensions per vector. |
 | `EMBEDDING_BASE_URL` | _(empty ⇒ OpenAI)_ | Embeddings endpoint. |
 | `EMBEDDING_API_KEY` | _(→ `OPENAI_API_KEY`)_ | Embeddings key. |
+| `EMBEDDING_INDEX_MODE` | `auto` | Index in the background or set `on_demand` and trigger a backfill. |
+| `EMBEDDING_PROFILE` | _(empty)_ | Optional deployment identity. Change it when replacing the model behind the same name and URL. |
 
-> **⚠️ Don't change `EMBEDDING_MODEL`/`EMBEDDING_DIM` after ingesting.** They are baked into the pgvector table names (`lightrag_vdb_*_<model>_<dim>d`). Changing either points the service at **new, empty** tables — the existing corpus must be re-ingested — and the value must stay consistent across a deployment.
+Changing the model, dimension, endpoint or deployment identity creates a new embedding profile. Backfill vectors from stored graph descriptions and document chunks. Keyword and exact reads remain available while indexing catches up. Leave provider keys and URLs empty to run manual mode without models. [Manual graph guide](manual-graph-guide.md)
 
 ### Vision
 
@@ -93,6 +95,18 @@ Any `QUERY_LLM_*` variable left blank falls back to the corresponding `LLM_*` va
 | `RAG_PORT` | `9622` | Host port for the API (loopback). |
 | `API_TOKENS` | _(empty ⇒ no auth)_ | Comma-separated tokens gating every endpoint except `/health`. See **Auth** below. |
 | `LOG_LEVEL` | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR`. `DEBUG` logs LightRAG/RAG-Anything prompt + document content — keep at `INFO` normally. |
+
+### MCP
+
+| Variable | Default | Notes |
+|---|---|---|
+| `MCP_GRAPH_WRITES` | `false` | Set to `true` to make three graph write tools available to MCP clients with API access. |
+| `MCP_VIEWER_BASE_URL` | _(empty)_ | Browser-facing HTTP(S) base URL for viewer links, with an optional deployment path prefix. Leave empty to use inline or standalone HTML delivery. |
+
+MCP is available on the API port at `/mcp` and shares the REST authentication settings.
+Apply changes to these variables by restarting the service with its updated environment.
+With Compose, `docker compose up -d` loads the updated `.env` settings and recreates the
+service when its configuration changes. [MCP tool reference](api-reference.md#mcp)
 
 ## Auth
 

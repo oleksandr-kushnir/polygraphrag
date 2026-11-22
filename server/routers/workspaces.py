@@ -6,7 +6,6 @@ LightRAG data behind each). Shared package state — the DB pool and the cached 
 is read from the `server` package at call time so the test suite's patches are honoured.
 """
 
-import re
 import shutil
 from pathlib import Path
 
@@ -15,6 +14,7 @@ from fastapi import Path as PathParam
 
 import server
 from server.deps import _is_valid_slug
+from server.graph_store import age_graph_name
 from server.schemas import (
     WorkspaceActionResponse,
     WorkspaceCreate,
@@ -22,24 +22,18 @@ from server.schemas import (
     WorkspaceOverview,
     WorkspacePublic,
 )
-from server.workspaces import _get_ws_lock
+from server.workspaces import (
+    _get_ws_lock,
+    _workspace_public,
+    get_workspace_overview,
+    list_workspace_records,
+)
 
 router = APIRouter()
 
 # Graph storage namespace; a workspace `w` gets AGE graph `{w}_chunk_entity_relation`
 # (see LightRAG PGGraphStorage._get_workspace_graph_name). The bootstrap `default` workspace,
 # whose physical name is POSTGRES_WORKSPACE, uses the bare `chunk_entity_relation` graph.
-_AGE_NAMESPACE = "chunk_entity_relation"
-
-
-def _workspace_public(row) -> dict:
-    ca = row["created_at"]
-    return {
-        "id": row["id"],
-        "name": row["name"],
-        "description": row["description"],
-        "created_at": ca.isoformat() if hasattr(ca, "isoformat") else ca,
-    }
 
 
 async def _db_get_workspace_any(pool, workspace_id: str):
@@ -67,7 +61,7 @@ async def _purge_workspace_data(pool, physical_workspace: str) -> None:
             f'DELETE FROM public."{t["table_name"]}" WHERE workspace = $1', physical_workspace
         )
     # 2. Drop the workspace's dedicated AGE graph, if it was ever created.
-    graph_name = f"{re.sub(r'[^a-zA-Z0-9_]', '_', physical_workspace)}_{_AGE_NAMESPACE}"
+    graph_name = age_graph_name(physical_workspace)
     if await pool.fetchval("SELECT 1 FROM ag_catalog.ag_graph WHERE name = $1", graph_name):
         async with pool.acquire() as conn:
             await conn.execute("LOAD 'age'")
@@ -99,13 +93,7 @@ async def list_workspaces(
         False, description="If true, return soft-deleted workspaces instead of active ones."
     ),
 ):
-    if server._db_pool is None:
-        raise HTTPException(503, "DB not initialised")
-    cond = "deleted_at IS NOT NULL" if deleted else "deleted_at IS NULL"
-    rows = await server._db_pool.fetch(
-        f"SELECT id, name, description, created_at FROM rag_workspaces WHERE {cond} ORDER BY created_at"
-    )
-    return {"workspaces": [_workspace_public(r) for r in rows]}
+    return await list_workspace_records(deleted=deleted)
 
 
 @router.post(
@@ -204,23 +192,6 @@ async def restore_workspace(
     return {"status": "restored", "id": workspace_id}
 
 
-async def _count_vdb(phys: str, kind: str) -> int | None:
-    """Distinct entity/relationship count from the dedup'd vector tables, discovering the
-    embedding-suffixed table name dynamically (robust to the configured embedding model)."""
-    try:
-        tbl = await server._db_pool.fetchval(
-            "SELECT table_name FROM information_schema.tables WHERE table_name LIKE $1 LIMIT 1",
-            f"lightrag_vdb_{kind}%",
-        )
-        if not tbl:
-            return None
-        return await server._db_pool.fetchval(
-            f"SELECT count(*) FROM {tbl} WHERE workspace=$1", phys
-        )
-    except Exception:
-        return None
-
-
 @router.get(
     "/workspace/{workspace_id}",
     summary="Workspace status (overview + counts)",
@@ -246,35 +217,4 @@ async def workspace_status(
     row = await _db_get_workspace_any(server._db_pool, workspace_id)
     if row is None:
         raise HTTPException(404, f"Workspace {workspace_id!r} not found")
-    phys = row["lightrag_workspace"]
-    doc_rows = await server._db_pool.fetch(
-        "SELECT status, count(*) AS n FROM lightrag_doc_status WHERE workspace=$1 GROUP BY status",
-        phys,
-    )
-    docs_by_status = {r["status"]: r["n"] for r in doc_rows}
-    chunks = await server._db_pool.fetchval(
-        "SELECT COALESCE(SUM(chunks_count),0) FROM lightrag_doc_status WHERE workspace=$1", phys
-    )
-    job_rows = await server._db_pool.fetch(
-        "SELECT status, count(*) AS n FROM rag_file_metadata WHERE workspace=$1 GROUP BY status",
-        phys,
-    )
-    last_uploaded = await server._db_pool.fetchval(
-        "SELECT MAX(uploaded_at) FROM rag_file_metadata WHERE workspace=$1", phys
-    )
-    return {
-        "id": row["id"],
-        "name": row["name"],
-        "description": row["description"],
-        "active": row["deleted_at"] is None,
-        "documents": {"by_status": docs_by_status, "total": sum(docs_by_status.values())},
-        "chunks": int(chunks or 0),
-        "entities": await _count_vdb(phys, "entity"),
-        "relationships": await _count_vdb(phys, "relation"),
-        "ingest": {
-            "by_status": {r["status"]: r["n"] for r in job_rows},
-            "last_uploaded_at": (
-                last_uploaded.isoformat() if hasattr(last_uploaded, "isoformat") else last_uploaded
-            ),
-        },
-    }
+    return await get_workspace_overview(row)

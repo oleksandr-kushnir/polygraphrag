@@ -2,6 +2,12 @@
 .env
 .env.*
 !.env.example
+/.mcp.json
+/.vscode/mcp.json
+/compose.override.yml
+/compose.override.yaml
+/docker-compose.override.yml
+/docker-compose.override.yaml
 
 # Python
 __pycache__/
@@ -15,9 +21,23 @@ venv/
 
 # Agent/tooling scratch
 .claude/
+/.agents/
+/.codex/
 .ruff_cache/
 
 # Local data / working dirs
 data/
 rag-data/
 *.log
+
+# Private MCP test stack
+/compose.n8n.yml
+/.n8n/
+/n8n-data/
+
+# Standalone local release rehearsal and fixtures
+/docs/manual-graph-release-rehearsal.md
+/scripts/manual_graph_e2e.py
+/scripts/manual_graph_legacy_fixture.sql
+/scripts/release_rehearsal.py
+/scripts/release_rehearsal_corpus.json

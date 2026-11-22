@@ -34,6 +34,8 @@ LLM_MODEL = os.getenv("LLM_MODEL", "gpt-5.4-mini")
 VISION_MODEL = os.getenv("VISION_MODEL", "gpt-5.4-mini")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1536"))
+EMBEDDING_INDEX_MODE = os.getenv("EMBEDDING_INDEX_MODE", "auto").strip().lower()
+EMBEDDING_PROFILE = os.getenv("EMBEDDING_PROFILE", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 # --- Per-role endpoints (embeddings / vision / whisper) ---
@@ -43,9 +45,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 #   <ROLE>_BASE_URL set   -> that endpoint, authed with <ROLE>_API_KEY (falls back to OPENAI_API_KEY)
 # Nothing is hardcoded to OpenAI anymore. See .env.example for each endpoint's specific requirements.
 
-# Embeddings. NOTE: EMBEDDING_MODEL + EMBEDDING_DIM name the pgvector tables
-# (lightrag_vdb_*_<model>_<dim>d). Changing the model/dim points at NEW empty tables — the
-# existing corpus must be re-ingested, and the value must stay consistent across the workspace.
+# Embeddings are indexed by deployment profile. A profile change queues the existing searchable
+# text for indexing again.
 EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "").strip() or None
 EMBEDDING_API_KEY = (
     (os.getenv("EMBEDDING_API_KEY", "").strip() or OPENAI_API_KEY)
@@ -159,6 +160,8 @@ MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
 # (machines) or via HTTP Basic with the token as the password (browsers). Read live so tests
 # can monkeypatch it, mirroring the _active_llm_cfg() idiom above.
 API_TOKENS = [t.strip() for t in os.getenv("API_TOKENS", "").split(",") if t.strip()]
+MCP_GRAPH_WRITES = os.getenv("MCP_GRAPH_WRITES", "false").strip().lower() == "true"
+MCP_VIEWER_BASE_URL = os.getenv("MCP_VIEWER_BASE_URL", "").strip()
 
 # Ingestion-integrity guard: after ainsert returns, confirm LightRAG actually finished
 # (doc_status == 'processed', and — when content is non-trivial — that it produced graph

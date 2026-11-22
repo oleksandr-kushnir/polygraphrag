@@ -15,7 +15,9 @@ async def _llm_func(prompt, system_prompt=None, history_messages=[], **kwargs):
 
     model, base_url, api_key, is_openai = config._active_llm_cfg()
     logging.debug("llm call: phase=%s model=%s", config._llm_phase.get(), model)
-    client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
+    client = openai.AsyncOpenAI(
+        api_key=api_key or ("local" if base_url else None), base_url=base_url
+    )
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
@@ -39,7 +41,10 @@ async def _vision_func(
 ):
     import openai
 
-    client = openai.AsyncOpenAI(api_key=config.VISION_API_KEY, base_url=config.VISION_BASE_URL)
+    client = openai.AsyncOpenAI(
+        api_key=config.VISION_API_KEY or ("local" if config.VISION_BASE_URL else None),
+        base_url=config.VISION_BASE_URL,
+    )
     if messages is not None:
         final_messages = messages
     elif image_data is not None:
@@ -71,7 +76,10 @@ async def _embedding_func(texts: list[str]):
     import openai
 
     client = openai.AsyncOpenAI(
-        api_key=config.EMBEDDING_API_KEY, base_url=config.EMBEDDING_BASE_URL
+        api_key=config.EMBEDDING_API_KEY or ("local" if config.EMBEDDING_BASE_URL else None),
+        base_url=config.EMBEDDING_BASE_URL,
     )
     resp = await client.embeddings.create(model=config.EMBEDDING_MODEL, input=texts)
-    return np.array([d.embedding for d in resp.data])
+    return np.array(
+        [d.embedding for d in sorted(resp.data, key=lambda item: getattr(item, "index", 0))]
+    )

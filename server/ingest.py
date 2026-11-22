@@ -28,6 +28,15 @@ _AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".opus", ".webm"}
 _OFFICE_SUFFIXES = {".docx", ".xlsx", ".pptx"}
 _TEXT_SUFFIXES = {".txt", ".md", ".html", ".csv"}
 
+
+def ingestion_roles(suffix: str) -> tuple[str, ...]:
+    if suffix in _AUDIO_SUFFIXES:
+        return ("extraction", "transcription")
+    if suffix in _TEXT_SUFFIXES:
+        return ("extraction",)
+    return ("extraction", "vision")
+
+
 # Full catalog of file types this service can parse & ingest (22 extensions).
 # Unknown types fall through to MinerU but their ingestion is NOT verified.
 #   TEXT   (text LLM):                     md, txt, csv, html
@@ -49,7 +58,10 @@ async def _extract_with_vision(path: Path) -> str:
 
     import openai
 
-    client = openai.AsyncOpenAI(api_key=config.VISION_API_KEY, base_url=config.VISION_BASE_URL)
+    client = openai.AsyncOpenAI(
+        api_key=config.VISION_API_KEY or ("local" if config.VISION_BASE_URL else None),
+        base_url=config.VISION_BASE_URL,
+    )
     b64 = base64.b64encode(path.read_bytes()).decode()
     suffix = path.suffix.lower()
     if suffix == ".pdf":
@@ -75,7 +87,10 @@ async def _extract_with_vision(path: Path) -> str:
 async def _transcribe_audio(path: Path) -> str:
     import openai
 
-    client = openai.AsyncOpenAI(api_key=config.WHISPER_API_KEY, base_url=config.WHISPER_BASE_URL)
+    client = openai.AsyncOpenAI(
+        api_key=config.WHISPER_API_KEY or ("local" if config.WHISPER_BASE_URL else None),
+        base_url=config.WHISPER_BASE_URL,
+    )
     with path.open("rb") as f:
         transcript = await client.audio.transcriptions.create(
             model=config.WHISPER_MODEL, file=f, response_format="text"
@@ -246,17 +261,19 @@ async def _process_file_impl(
     await rag_instance.lightrag.ainsert(content, ids=[doc_id], file_paths=[lightrag_input])
     # Don't trust ainsert returning — confirm the graph extraction actually completed, and
     # capture the exact file_path LightRAG stored (its canonical citation key).
-    verdict, doc_id, reason, lightrag_key = await _verify_ingestion(rag_instance, content)
+    verdict, verified_doc_id, reason, lightrag_key = await _verify_ingestion(rag_instance, content)
     if verdict != "ok":
         # Clean up the partial doc (+ its LLM cache) so the retry re-extracts instead of being
         # skipped as a duplicate or served a stale cached extraction.
-        if doc_id:
+        if verified_doc_id:
             try:
-                await rag_instance.lightrag.adelete_by_doc_id(doc_id, delete_llm_cache=True)
+                await rag_instance.lightrag.adelete_by_doc_id(
+                    verified_doc_id, delete_llm_cache=True
+                )
             except Exception as exc:
-                logging.warning("cleanup of partial doc %s failed: %s", doc_id, exc)
+                logging.warning("cleanup of partial doc %s failed: %s", verified_doc_id, exc)
         raise IngestionIncompleteError(f"ingestion incomplete ({reason})")
-    return doc_id, (lightrag_key or lightrag_input)
+    return verified_doc_id, (lightrag_key or lightrag_input)
 
 
 def _build_metadata(description: str, source_path: str, last_modified: str) -> str:

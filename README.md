@@ -1,5 +1,7 @@
 # PolyGraphRAG
 
+**Give your AI agents a knowledge graph with one MCP endpoint.** Connect at `/mcp` to search workspace evidence, follow relationships, and show interactive graphs. [Connect an MCP client →](#connect-your-agent-with-mcp)
+
 <p align="center">
   <img alt="PolyGraphRAG: turning messy multimodal data into production-ready knowledge graphs" src="docs/images/hero.png" width="100%">
 </p>
@@ -17,6 +19,17 @@
 </p>
 
 PolyGraphRAG wraps [RAG-Anything](https://github.com/HKUDS/RAG-Anything) and [LightRAG](https://github.com/HKUDS/LightRAG) in a deployable HTTP API and adds the things you need to actually run graph-RAG as a service: **many isolated projects on one instance**, **asynchronous ingest jobs**, **pluggable model providers per role**, file lifecycle management, and an **interactive graph viewer**.
+
+## Connect your agent with MCP
+
+Point any **Streamable HTTP** MCP client at **`http://localhost:9622/mcp`**. Your client discovers the tools and their inputs automatically. Give a research agent just the tools it needs, or add graph editing to a workflow that maintains the knowledge base.
+
+- **Search with sources.** Retrieve entities, relationships, text chunks, and document references with `search_workspace`, or ask PolyGraphRAG to synthesize a cited answer with `ask_workspace`.
+- **Follow the graph.** Find an entity by name, inspect its source evidence, and traverse the actual relationships. Keyword lookup and traversal work with all model providers disabled.
+- **Show the graph.** Use `show_workspace_graph` to render an interactive graph in an MCP Apps host, export a self-contained HTML file, or return a browser link.
+- **Write facts directly.** Opt in with `MCP_GRAPH_WRITES=true` to insert entities and relationships in one atomic batch or patch records by revision. Manual and extracted facts live in the same graph.
+
+The server exposes **12 read tools by default**. Set `API_TOKENS` to require the same bearer authentication as REST. For setup, a runnable client example, and the full catalog, see the [MCP tool reference](docs/api-reference.md#mcp).
 
 ---
 
@@ -41,18 +54,11 @@ PolyGraphRAG wraps [RAG-Anything](https://github.com/HKUDS/RAG-Anything) and [Li
 
 ---
 
-## 🔀🤖 The perfect memory & knowledge backend for n8n workflows and AI agents
+## 🔀🤖 A knowledge backend for workflows and AI agents
 
-**Pure API, built for automators — every feature is an endpoint you can call.** No app to adopt, no dashboard to learn: you get a clean, fully-documented API plus a **Swagger UI** at `/docs` to explore and test it, and an interactive **graph viewer** you can fetch as HTML and drop straight into your own app or agent UI when you want to show the knowledge graph. It's exactly what you want when the "user" is a workflow or an agent — nothing between you and the automation.
+**Upload through REST, explore through MCP, and open the same graph in a browser.** A workflow can feed documents from a drive, inbox, or webhook into `POST /workspace/{id}/upload/batch`. PolyGraphRAG handles parsing and extraction in the background. Once the job finishes, an agent can retrieve the evidence through MCP or REST.
 
-**It's just HTTP + bearer auth — no SDK, no client library, no glue code.** Every capability is a plain REST call, so it drops straight into an **n8n HTTP Request node** or an **AI agent tool** with zero adapters:
-
-- **Ingest** — wire a Google Drive / Gmail / webhook trigger straight into `POST /workspace/{id}/upload/batch`. Your automation feeds files in; PolyGraphRAG does the OCR, parsing, transcription, and graph-building.
-- **Query as a tool** — give your agent `POST /workspace/{id}/query` for a synthesized answer, or `POST /workspace/{id}/query/data` for **structured evidence with no LLM answer** — ideal when the agent wants raw facts to reason over instead of prose.
-- **Isolate per client/topic** — one workspace per project means an n8n workflow or a multi-tenant agent can keep every knowledge base cleanly separated on a single deployment.
-- **A machine-readable contract** — `/openapi.json` declares typed response schemas for every endpoint (including the canonical ingest-job status enum) and advertises the Bearer/Basic auth scheme, so a tool-calling agent can learn the entire API from the spec alone, no live probing needed.
-
-Retrieval-augmented n8n flows and tool-calling agents get a **multimodal, graph-aware knowledge store behind a single URL** — point your workflow at it and ship.
+Give each project its own workspace on a single deployment. Use **Swagger UI** at `/docs` to try the REST endpoints and `/openapi.json` to build typed integrations. If your source system already knows the facts, write them directly and start querying the graph without model credentials. [Manual graph guide](docs/manual-graph-guide.md)
 
 ---
 
@@ -63,13 +69,14 @@ Retrieval-augmented n8n flows and tool-calling agents get a **multimodal, graph-
 - 🧩 **Genuinely multimodal.** PDFs and images go through a vision model, Office docs via LibreOffice, audio via Whisper, and text/markdown/CSV directly — 22 file types, one upload endpoint.
 - 🕸️ **A real knowledge graph, not just chunks.** LightRAG extracts entities and relationships and stores them in **Apache AGE** (graph) + **pgvector** (embeddings) inside one Postgres. Query modes span local, global, hybrid, and naive retrieval, and `query/data` returns the structured evidence without an LLM answer.
 - ⚙️ **Built to operate.** Async batch ingestion with per-file job tracking and integrity verification, soft-delete + restore of workspaces, per-file delete that correctly preserves entities shared with other documents, and a container `HEALTHCHECK`.
-- ✅ **A fully mocked test suite (230+ tests).** The suite stubs RAG-Anything, LightRAG, and the database, so `pytest` runs green with **no Postgres and no API keys**.
+- ✅ **A fully mocked test suite.** The suite stubs RAG-Anything, LightRAG, and the database, so you can test REST and MCP with **no Postgres and no API keys**.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    client([Client / curl / app]) -->|HTTP| api[FastAPI service<br/>PolyGraphRAG]
+    client([REST client]) -->|HTTP| api[FastAPI service<br/>PolyGraphRAG]
+    agent([MCP client]) -->|Streamable HTTP| api
 
     subgraph providers[Pluggable model providers &#40;per role&#41;]
       llm[Extraction + Query LLM]
@@ -105,7 +112,7 @@ PolyGraphRAG's storage backend **is** Postgres (pgvector + Apache AGE + pg_trgm)
 ## Quickstart
 
 ```bash
-cp .env.example .env          # set POSTGRES_PASSWORD + at least one API key
+cp .env.example .env          # set POSTGRES_PASSWORD
 docker compose pull           # fetch prebuilt images from GHCR (fast path)
 docker compose up -d          # start Postgres(+AGE) and the API
 curl localhost:9622/health    # -> {"status":"ok"}
@@ -115,6 +122,11 @@ Prefer to build the images yourself (e.g. after changing the code)? Swap the mid
 two commands for `docker compose up -d --build`.
 
 Open **http://localhost:9622/docs** for the full interactive Swagger UI.
+
+For a first MCP call, connect at **`http://localhost:9622/mcp`** and run `list_workspaces`.
+A new database has a `default` workspace. You can start with manual graph data using only
+Postgres. Configure model providers in `.env` for document extraction, vector search, and
+generated answers. [Configuration guide](docs/configuration.md)
 
 > **Auth is off by default** (the ports are loopback-only). To require credentials, set
 > `API_TOKENS` in `.env` (comma-separated). Every endpoint except `/health` then needs a token:
@@ -160,7 +172,10 @@ curl -X POST localhost:9622/workspace/acme/query \
 | Ingestion | `POST /workspace/{id}/upload/batch` · `GET /workspace/{id}/batch/{batch_id}` · `GET /workspace/{id}/status/{job_id}` · `GET /workspace/{id}/jobs` |
 | Files | `GET /workspace/{id}/files` · `DELETE /workspace/{id}/file/delete` |
 | Query | `POST /workspace/{id}/query` · `POST /workspace/{id}/query/data` |
+| Manual graph | Atomic writes, revisioned edits, lookup, traversal, and merges under [`/workspace/{id}/graph`](docs/api-reference.md#manual-graph-and-embedding-operations) |
+| Embeddings | Consistency, missing vectors, and backfill under [`/workspace/{id}/embeddings`](docs/api-reference.md#manual-graph-and-embedding-operations) |
 | Visualization | `GET /workspace/{id}/graph.html` |
+| MCP | [`POST /mcp`](docs/api-reference.md#mcp) for tool discovery and invocation over Streamable HTTP |
 
 Full request/response details, query modes, and examples live in **[docs/api-reference.md](docs/api-reference.md)**.
 
@@ -178,7 +193,7 @@ EMBEDDING_MODEL=text-embedding-3-small     # blank EMBEDDING_BASE_URL -> OpenAI
 OPENAI_API_KEY=sk-...
 ```
 
-See **[.env.example](.env.example)** for every variable and **[docs/configuration.md](docs/configuration.md)** for the full routing matrix and caveats (e.g. changing `EMBEDDING_MODEL`/`EMBEDDING_DIM` repoints the vector tables and requires re-ingestion).
+See **[.env.example](.env.example)** for deployment settings and **[docs/configuration.md](docs/configuration.md)** for provider routing and embedding backfill after a model change.
 
 ## Testing
 
@@ -212,6 +227,7 @@ python scripts/smoke_test.py          # in-process ASGI smoke (stubs, no DB/keys
 │   ├── llm.py           #   LLM / embedding shims
 │   ├── references.py    #   citation + real-path resolution
 │   ├── graph.py         #   knowledge-graph HTML rendering
+│   ├── mcp.py           #   MCP tool catalog and Streamable HTTP transport
 │   ├── auth.py          #   opt-in API-token middleware
 │   ├── deps.py          #   shared endpoint dependencies
 │   └── routers/         #   query, documents, and workspace-registry endpoints
@@ -227,7 +243,9 @@ python scripts/smoke_test.py          # in-process ASGI smoke (stubs, no DB/keys
 ## Documentation
 
 - **[docs/architecture.md](docs/architecture.md)** — services, request flow, workspace isolation, and the storage model.
-- **[docs/api-reference.md](docs/api-reference.md)** — every endpoint with parameters and examples.
+- **[MCP tool reference](docs/api-reference.md#mcp)** — connect clients, discover tools, and deliver interactive graphs.
+- **[Manual graph guide](docs/manual-graph-guide.md)** — load, edit, and traverse your own facts, with or without model providers.
+- **[REST API reference](docs/api-reference.md)** — endpoints, parameters, and examples.
 - **[docs/configuration.md](docs/configuration.md)** — all environment variables and the provider-routing matrix.
 - **[docs/lightrag-internals.md](docs/lightrag-internals.md)** — how ingestion builds the graph and how retrieval works under the hood.
 

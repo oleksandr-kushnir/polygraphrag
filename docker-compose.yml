@@ -59,11 +59,13 @@ services:
       QUERY_LLM_BASE_URL: ${QUERY_LLM_BASE_URL:-}
       QUERY_LLM_API_KEY: ${QUERY_LLM_API_KEY:-}
 
-      # --- Embeddings (pgvector). Model+dim name the vector tables; keep stable. ---
+      # --- Embeddings (pgvector). Model and deployment changes trigger reindexing. ---
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
       EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
       EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_INDEX_MODE: ${EMBEDDING_INDEX_MODE:-auto}
+      EMBEDDING_PROFILE: ${EMBEDDING_PROFILE:-}
 
       # --- Vision (PDF/image extraction) — must be a multimodal model ---
       VISION_MODEL: ${VISION_MODEL:-gpt-5.4-mini}
@@ -89,6 +91,8 @@ services:
       # the service; machines use `Authorization: Bearer <token>`, browsers use Basic
       # (any username + token as password). Every endpoint except /health is gated.
       API_TOKENS: ${API_TOKENS:-}
+      MCP_GRAPH_WRITES: ${MCP_GRAPH_WRITES:-false}
+      MCP_VIEWER_BASE_URL: ${MCP_VIEWER_BASE_URL:-}
     volumes:
       - ragdata:/app/data
     ports:

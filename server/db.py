@@ -5,6 +5,7 @@ startup and from request handlers), and read only static configuration from serv
 rag_file_metadata table is this service's own system-of-record, separate from LightRAG's storage.
 """
 
+import server
 from server import config
 
 
@@ -83,7 +84,134 @@ async def _db_init(pool) -> None:
         "CREATE INDEX IF NOT EXISTS idx_rag_file_metadata_lightrag_key "
         "ON rag_file_metadata (workspace, lightrag_key)"
     )
+    await pool.execute("""
+        CREATE TABLE IF NOT EXISTS rag_graph_imports (
+            workspace TEXT PRIMARY KEY REFERENCES rag_workspaces(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS rag_graph_merge_previews (
+            workspace TEXT NOT NULL REFERENCES rag_workspaces(id) ON DELETE CASCADE,
+            token TEXT NOT NULL,
+            input JSONB NOT NULL,
+            fingerprint TEXT NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL DEFAULT now()+interval '1 hour',
+            PRIMARY KEY (workspace,token)
+        );
+        CREATE TABLE IF NOT EXISTS rag_graph_records (
+            workspace TEXT NOT NULL REFERENCES rag_workspaces(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL CHECK (kind IN ('entity', 'relationship', 'chunk')),
+            id TEXT NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 1,
+            extracted JSONB,
+            manual JSONB,
+            identity_fallback JSONB,
+            suppressed BOOLEAN NOT NULL DEFAULT FALSE,
+            redirect TEXT,
+            source TEXT GENERATED ALWAYS AS ((COALESCE(extracted, '{}') ||
+                                             COALESCE(manual, '{}'))->>'source') STORED,
+            target TEXT GENERATED ALWAYS AS ((COALESCE(extracted, '{}') ||
+                                             COALESCE(manual, '{}'))->>'target') STORED,
+            endpoint_kind TEXT GENERATED ALWAYS AS ('entity'::text) STORED,
+            PRIMARY KEY (workspace, kind, id),
+            FOREIGN KEY (workspace, endpoint_kind, source)
+                REFERENCES rag_graph_records(workspace, kind, id),
+            FOREIGN KEY (workspace, endpoint_kind, target)
+                REFERENCES rag_graph_records(workspace, kind, id)
+        );
+        CREATE INDEX IF NOT EXISTS rag_graph_source ON rag_graph_records (workspace, source);
+        CREATE INDEX IF NOT EXISTS rag_graph_target ON rag_graph_records (workspace, target);
+        CREATE INDEX IF NOT EXISTS rag_graph_name ON rag_graph_records
+            (workspace, lower(COALESCE(manual->>'name', extracted->>'name')));
+        CREATE INDEX IF NOT EXISTS rag_graph_redirect ON rag_graph_records (workspace, redirect)
+            WHERE redirect IS NOT NULL;
+        CREATE OR REPLACE VIEW rag_graph_active AS
+            SELECT r.*,
+                COALESCE(r.identity_fallback, '{}') || COALESCE(r.extracted, '{}') ||
+                    COALESCE(r.manual, '{}') AS fields,
+                CASE WHEN r.kind='entity' THEN (
+                    SELECT jsonb_agg(evidence.source ORDER BY retired.id, evidence.source::text)
+                    FROM rag_graph_records retired
+                    CROSS JOIN LATERAL jsonb_array_elements(
+                        COALESCE(retired.extracted->'sources', '[]') ||
+                        CASE WHEN retired.manual->>'source_ref' IS NULL THEN '[]'::jsonb
+                             ELSE jsonb_build_array(jsonb_build_object(
+                                 'origin', 'manual', 'source_ref', retired.manual->>'source_ref'
+                             )) END
+                    ) AS evidence(source)
+                    WHERE retired.workspace=r.workspace AND retired.kind='entity'
+                      AND retired.redirect=r.id
+                ) END AS merged_sources
+            FROM rag_graph_records r
+            WHERE NOT r.suppressed AND r.redirect IS NULL
+              AND (r.extracted IS NOT NULL OR r.manual IS NOT NULL OR r.identity_fallback IS NOT NULL)
+              AND (r.kind<>'relationship' OR (
+                SELECT count(*) FROM rag_graph_records n
+                WHERE n.workspace=r.workspace AND n.kind='entity'
+                  AND n.id IN (r.source, r.target)
+                  AND NOT n.suppressed AND n.redirect IS NULL
+                  AND (n.extracted IS NOT NULL OR n.manual IS NOT NULL OR n.identity_fallback IS NOT NULL)
+              )=CASE WHEN r.source=r.target THEN 1 ELSE 2 END);
+        CREATE OR REPLACE VIEW rag_graph_index_inputs AS
+            SELECT workspace, kind, id, fields, origins, content,
+                   md5(content) AS content_key
+            FROM (
+                SELECT r.workspace, r.kind, r.id, r.fields,
+                    ARRAY_REMOVE(ARRAY[
+                        CASE WHEN r.manual IS NOT NULL
+                                OR r.merged_sources @> '[{"origin":"manual"}]'
+                             THEN 'manual' END,
+                        CASE WHEN r.extracted IS NOT NULL
+                                OR r.merged_sources @> '[{"origin":"extracted"}]'
+                             THEN 'extracted' END
+                    ], NULL) AS origins,
+                    CASE WHEN r.kind='chunk' THEN COALESCE(r.fields->>'description', '')
+                         ELSE concat_ws(E'\n', r.fields->>'name', r.fields->>'type',
+                             CASE WHEN r.kind='relationship' THEN COALESCE(
+                                 s.manual->>'name', s.extracted->>'name',s.identity_fallback->>'name') END,
+                             CASE WHEN r.kind='relationship' THEN COALESCE(
+                                 t.manual->>'name', t.extracted->>'name',t.identity_fallback->>'name') END,
+                             r.fields->>'description') END AS content
+                FROM rag_graph_active r
+                LEFT JOIN rag_graph_records s ON
+                    (s.workspace,s.kind,s.id)=(r.workspace,'entity',r.source)
+                LEFT JOIN rag_graph_records t ON
+                    (t.workspace,t.kind,t.id)=(r.workspace,'entity',r.target)
+            ) AS inputs;
+        CREATE TABLE IF NOT EXISTS rag_graph_vectors (
+            workspace TEXT NOT NULL REFERENCES rag_workspaces(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            id TEXT NOT NULL,
+            profile TEXT NOT NULL,
+            content_key TEXT NOT NULL,
+            embedding vector NOT NULL,
+            PRIMARY KEY (workspace,kind,id,profile)
+        );
+        CREATE TABLE IF NOT EXISTS rag_embedding_jobs (
+            workspace TEXT NOT NULL REFERENCES rag_workspaces(id) ON DELETE CASCADE,
+            id TEXT NOT NULL,
+            profile TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'queued',
+            lease_token TEXT,
+            lease_until TIMESTAMPTZ,
+            ready_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (workspace,id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS rag_embedding_active_job ON
+            rag_embedding_jobs(workspace,profile)
+            WHERE state IN ('queued','running','waiting_for_provider');
+        CREATE TABLE IF NOT EXISTS rag_embedding_items (
+            workspace TEXT NOT NULL,
+            job TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            id TEXT NOT NULL,
+            content_key TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending',
+            PRIMARY KEY (workspace,job,kind,id),
+            FOREIGN KEY (workspace,job) REFERENCES rag_embedding_jobs(workspace,id) ON DELETE CASCADE
+        );
+    """)
     await _db_seed_default_workspace(pool)
+    server._graph_pool = pool
 
 
 async def _db_seed_default_workspace(pool) -> None:

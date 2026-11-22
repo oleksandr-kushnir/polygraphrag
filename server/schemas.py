@@ -7,9 +7,9 @@ puts the real field names, nullability, and the job-status enum into /openapi.js
 tool-calling agents can read them.
 """
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, StringConstraints, model_validator
 
 _MODE_DESC = (
     "Retrieval mode: 'mix' (default, graph + vector — recommended), 'local' (entity-centric), "
@@ -39,6 +39,8 @@ class QueryRequest(BaseModel):
         le=_TOP_K_MAX,
         description=f"Entities/relationships retrieved per keyword set. Default 40, max {_TOP_K_MAX}.",
     )
+    ll_keywords: list[str] | None = Field(None, max_length=50)
+    hl_keywords: list[str] | None = Field(None, max_length=50)
 
 
 class QueryDataRequest(BaseModel):
@@ -57,6 +59,8 @@ class QueryDataRequest(BaseModel):
         le=_TOP_K_MAX,
         description=f"Entities/relationships retrieved per keyword set. Default 40, max {_TOP_K_MAX}.",
     )
+    ll_keywords: list[str] | None = Field(None, max_length=50)
+    hl_keywords: list[str] | None = Field(None, max_length=50)
     file_path_contains: list[str] = Field(
         default_factory=list,
         description=(
@@ -69,6 +73,332 @@ class QueryDataRequest(BaseModel):
             'Example (to narrow): ["/corpus/career/", "/corpus/projects/"].'
         ),
     )
+
+
+class AskWorkspaceInput(QueryRequest, extra="forbid"):
+    workspace_id: str = Field(description="Public ID of an active workspace.")
+
+
+class SearchWorkspaceInput(QueryDataRequest, extra="forbid"):
+    workspace_id: str = Field(description="Public ID of an active workspace.")
+
+
+GraphID = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")]
+GraphLabel = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=512, pattern=r"^[^\x00]+$"),
+]
+GraphText = Annotated[str, StringConstraints(max_length=20000, pattern=r"^[^\x00]*$")]
+Revision = Annotated[int, Field(ge=1)]
+GraphKind = Literal["entity", "relationship"]
+IndexKind = Literal["entity", "relationship", "chunk"]
+SearchMode = Literal["keyword", "semantic", "hybrid"]
+GraphOrigin = Literal["manual", "extracted"]
+Direction = Literal["in", "out", "both"]
+
+
+class GraphWrite(BaseModel, extra="forbid"):
+    expected_revision: Revision | None = None
+    source_ref: GraphText | None = None
+
+
+class EntityWrite(GraphWrite):
+    name: GraphLabel
+    type: GraphLabel
+    description: GraphText = ""
+
+
+class RelationshipWrite(GraphWrite):
+    source: GraphID
+    target: GraphID
+    type: GraphLabel
+    description: GraphText = ""
+
+
+class PartialGraphWrite(GraphWrite):
+    type: GraphLabel | None = None
+    description: GraphText | None = None
+
+    @model_validator(mode="after")
+    def validate_patch(self):
+        changes = self.model_dump(exclude_unset=True, exclude={"expected_revision", "source_ref"})
+        if any(value is None for value in changes.values()):
+            raise ValueError("Only source_ref can be cleared with null")
+        if self.expected_revision is None or not self.model_fields_set - {"expected_revision"}:
+            raise ValueError("A revision and at least one field to edit are required")
+        return self
+
+
+class EntityPatch(PartialGraphWrite):
+    name: GraphLabel | None = None
+
+
+class RelationshipPatch(PartialGraphWrite):
+    source: GraphID | None = None
+    target: GraphID | None = None
+
+
+class EntityBatchItem(EntityWrite):
+    id: GraphID
+
+
+class RelationshipBatchItem(RelationshipWrite):
+    id: GraphID
+
+
+class GraphBatch(BaseModel, extra="forbid"):
+    entities: list[EntityBatchItem] = Field(default_factory=list, max_length=500)
+    relationships: list[RelationshipBatchItem] = Field(default_factory=list, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_items(self):
+        if not (self.entities or self.relationships):
+            raise ValueError("At least one graph record is required")
+        for group in (self.entities, self.relationships):
+            if len({item.id for item in group}) != len(group):
+                raise ValueError("Duplicate IDs in batch")
+        return self
+
+
+class GraphSource(BaseModel):
+    origin: GraphOrigin
+    source_ref: str | None = None
+    file_path: str | None = None
+    chunk_id: str | None = None
+    document_id: str | None = None
+
+
+class GraphRecord(BaseModel):
+    id: str
+    type: str
+    description: str
+    revision: int
+    origins: list[GraphOrigin]
+    sources: list[GraphSource]
+    requested_id: str | None = None
+
+
+class GraphEntity(GraphRecord):
+    name: str
+    degree: int | None = None
+
+
+class GraphRelationship(GraphRecord):
+    source: str
+    target: str
+    direction: Literal["directed", "undirected"]
+
+
+class GraphContents(BaseModel):
+    entities: list[GraphEntity]
+    relationships: list[GraphRelationship]
+
+
+class GraphNeighborhood(GraphContents):
+    truncated: bool
+
+
+class EntityPage(BaseModel):
+    items: list[GraphEntity]
+    total: int
+    next_cursor: str | None
+
+
+class EntityFilters(BaseModel, extra="forbid"):
+    name: GraphLabel | None = None
+    match: Literal["exact", "contains"] = "contains"
+    type: GraphLabel | None = None
+    origin: GraphOrigin | None = None
+    sort: Literal["degree"] | None = None
+    q: str | None = Field(None, max_length=2000)
+    text: GraphLabel | None = None
+    mode: SearchMode = "keyword"
+    limit: int = Field(50, ge=1, le=200)
+    cursor: str | None = Field(None, max_length=512)
+
+
+class NeighborOptions(BaseModel, extra="forbid"):
+    hops: int = Field(1, ge=0, le=3)
+    direction: Direction = "both"
+    relationship_type: GraphLabel | None = None
+    max_nodes: int = Field(100, ge=1, le=1000)
+
+
+class GraphViewerOptions(BaseModel, extra="forbid"):
+    node_label: str = "*"
+    max_depth: int = Field(3, ge=1)
+    max_nodes: int = Field(5000, ge=1, description="At most 5000 for inline and HTML delivery.")
+    physics: bool = True
+    file_path_contains: list[str] = Field(default_factory=list)
+
+
+class GraphViewerResult(BaseModel):
+    workspace_id: str
+    title: str
+    representation: Literal["inline", "html", "link"]
+    viewer_url: str | None = None
+
+
+class EmptyToolInput(BaseModel, extra="forbid"):
+    pass
+
+
+class WorkspaceToolInput(BaseModel, extra="forbid"):
+    workspace_id: str = Field(description="Public ID of an active workspace.")
+
+
+class JobToolInput(WorkspaceToolInput):
+    job_id: str
+
+
+class FindEntitiesToolInput(EntityFilters, WorkspaceToolInput):
+    pass
+
+
+class EntityToolInput(WorkspaceToolInput):
+    entity_id: GraphID
+
+
+class RelationshipToolInput(WorkspaceToolInput):
+    edge_id: GraphID
+
+
+class NeighborsToolInput(NeighborOptions, EntityToolInput):
+    pass
+
+
+class ShowGraphToolInput(GraphViewerOptions, WorkspaceToolInput):
+    delivery: Literal["auto", "html", "link"] = "auto"
+
+    @model_validator(mode="after")
+    def validate_node_limit(self):
+        if self.delivery != "link" and self.max_nodes > 5000:
+            raise ValueError("Inline and HTML delivery support at most 5000 nodes")
+        return self
+
+
+class GraphRetrieve(BaseModel, extra="forbid"):
+    q: str | None = Field(None, max_length=2000)
+    text: GraphLabel | None = None
+    mode: SearchMode = "keyword"
+    seed_kind: GraphKind = "entity"
+    seed_limit: int = Field(5, ge=1, le=50)
+    hops: int = Field(1, ge=0, le=3)
+    max_nodes: int = Field(100, ge=1, le=1000)
+    origin: GraphOrigin | None = None
+    type: GraphLabel | None = None
+
+    @model_validator(mode="after")
+    def validate_search(self):
+        if self.mode != "keyword" and not self.text:
+            raise ValueError("text is required for semantic and hybrid search")
+        if not (self.q or self.text):
+            raise ValueError("q or text is required")
+        return self
+
+
+class RetrieveGraphToolInput(GraphRetrieve, WorkspaceToolInput):
+    pass
+
+
+class GraphBatchToolInput(GraphBatch, WorkspaceToolInput):
+    pass
+
+
+class EntityPatchToolInput(EntityPatch, EntityToolInput):
+    expected_revision: Revision = Field(...)
+
+
+class RelationshipPatchToolInput(RelationshipPatch, RelationshipToolInput):
+    expected_revision: Revision = Field(...)
+
+
+class GraphSeed(BaseModel):
+    id: str
+    kind: GraphKind
+
+
+class EmbeddingCoverage(BaseModel):
+    indexed: int
+    eligible: int
+
+
+class GraphRetrieval(GraphNeighborhood):
+    seeds: list[GraphSeed]
+    sources: list[GraphSource]
+    coverage: EmbeddingCoverage
+
+
+class GraphDeletion(BaseModel):
+    id: str
+    revision: int
+    affected_relationships: int
+
+
+class MergePreviewRequest(BaseModel, extra="forbid"):
+    survivor_id: GraphID
+    retire_ids: list[GraphID] = Field(min_length=1, max_length=50)
+
+    @model_validator(mode="after")
+    def distinct_ids(self):
+        if len(set([self.survivor_id, *self.retire_ids])) != len(self.retire_ids) + 1:
+            raise ValueError("Merge participants must be distinct")
+        return self
+
+
+class MergeApplyRequest(BaseModel, extra="forbid"):
+    preview_token: str = Field(max_length=10000)
+    resolutions: dict[Literal["name", "type", "description"], GraphText] = Field(
+        default_factory=dict
+    )
+    allow_self_loops: bool = False
+
+
+class MergePreview(BaseModel):
+    preview_token: str
+    survivor: GraphEntity
+    retired: list[GraphEntity]
+    rewired_edges: list[GraphRelationship]
+    conflicts: dict[str, list[str]]
+    self_loops: list[str]
+
+
+class MergeResult(BaseModel):
+    survivor: GraphEntity
+    retired_ids: list[str]
+    rewired_relationships: int
+
+
+EmbeddingState = Literal["missing", "stale", "needs_embedding"]
+
+
+class MissingEmbedding(BaseModel):
+    id: str
+    kind: IndexKind
+    name: str | None = None
+    chunk_ref: str | None = None
+    state: Literal["missing", "stale"]
+    reason: str
+    job_state: str | None = None
+
+
+class MissingEmbeddingsPage(BaseModel):
+    items: list[MissingEmbedding]
+    total: int
+    next_cursor: str | None
+
+
+class EmbeddingJob(BaseModel):
+    job_id: str
+    profile: str
+    state: Literal["queued", "running", "waiting_for_provider", "completed", "failed"]
+    counts: dict[IndexKind, dict[str, int]]
+
+
+class EmbeddingConsistency(BaseModel):
+    profile: str
+    checked_at: str
+    counts: dict[IndexKind, dict[str, int]]
 
 
 class WorkspaceCreate(BaseModel):
@@ -107,9 +437,7 @@ class FileDeleteRequest(BaseModel):
         """Absent *file* → noop is right; absent *identifier* is a client error. Without this,
         a misspelled field name would read as silent success."""
         if not (self.doc_id or self.external_path or self.rel_path):
-            raise ValueError(
-                "Provide at least one identifier: doc_id, external_path, or rel_path."
-            )
+            raise ValueError("Provide at least one identifier: doc_id, external_path, or rel_path.")
         return self
 
 
@@ -121,6 +449,12 @@ class FileDeleteRequest(BaseModel):
 # status (which includes 'processed'): a finished job is 'done'. 'save_failed' means the
 # uploaded bytes could not be written before processing started.
 JobStatus = Literal["pending", "processing", "retrying", "done", "failed", "save_failed"]
+
+
+class IngestJobStatus(BaseModel):
+    job_id: str
+    status: JobStatus
+    attempts: int | None = None
 
 
 class HealthResponse(BaseModel):

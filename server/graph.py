@@ -6,6 +6,7 @@ coloring, property tooltips, and inlining the vendored D3 source.
 """
 
 import json
+import re
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -89,9 +90,7 @@ def _props_tooltip(props: dict) -> str:
     return "\n".join(lines)
 
 
-# Self-contained page: inlined D3, an embedded {nodes, links} blob, and a canvas force-graph
-# script. Placeholders (__D3_SOURCE__ / __DATA_JSON__ / __PHYSICS__ / __BGCOLOR__) are filled by
-# str.replace so the JS braces need no escaping.
+# Standalone exports and the MCP App use the same D3 renderer.
 _HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -146,6 +145,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     width: 11px; height: 11px; border-radius: 50%;
     flex: 0 0 auto; border: 1px solid rgba(0,0,0,0.4);
   }
+__EXTRA_STYLE__
 </style>
 </head>
 <body>
@@ -153,233 +153,244 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 <div id="tooltip"></div>
 <div id="hint">scroll to zoom · drag background to pan · drag a node to move it · hover for details</div>
 <div id="legend"></div>
+__STATUS__
 <script>__D3_SOURCE__</script>
 <script>
-const DATA = __DATA_JSON__;
-const PHYSICS = __PHYSICS__;
-const LEGEND = __LEGEND_JSON__;
-const nodes = DATA.nodes;
-const links = DATA.links;
+function renderGraph(DATA, PHYSICS, LEGEND) {
+  const nodes = DATA.nodes;
+  const links = DATA.links;
 
-const canvas = document.getElementById("graph");
-const ctx = canvas.getContext("2d");
-const tooltip = document.getElementById("tooltip");
+  const canvas = document.getElementById("graph");
+  const ctx = canvas.getContext("2d");
+  const tooltip = document.getElementById("tooltip");
+  const legend = document.getElementById("legend");
+  const events = new AbortController();
+  const listening = { signal: events.signal };
 
-// --- Legend (entity type -> node color) ---
-(function buildLegend() {
-  const el = document.getElementById("legend");
-  if (!LEGEND || !LEGEND.length) { el.style.display = "none"; return; }
-  const title = document.createElement("div");
-  title.className = "legend-title";
-  title.textContent = "Entity type";
-  el.appendChild(title);
-  for (const entry of LEGEND) {
-    const row = document.createElement("div");
-    row.className = "legend-item";
-    const swatch = document.createElement("span");
-    swatch.className = "legend-swatch";
-    swatch.style.backgroundColor = entry.color;
-    const label = document.createElement("span");
-    label.textContent = entry.label;
-    row.appendChild(swatch);
-    row.appendChild(label);
-    el.appendChild(row);
+  // --- Legend (entity type -> node color) ---
+  (function buildLegend() {
+    const el = legend;
+    el.replaceChildren();
+    el.style.display = "";
+    if (!LEGEND || !LEGEND.length) { el.style.display = "none"; return; }
+    const title = document.createElement("div");
+    title.className = "legend-title";
+    title.textContent = "Entity type";
+    el.appendChild(title);
+    for (const entry of LEGEND) {
+      const row = document.createElement("div");
+      row.className = "legend-item";
+      const swatch = document.createElement("span");
+      swatch.className = "legend-swatch";
+      swatch.style.backgroundColor = entry.color;
+      const label = document.createElement("span");
+      label.textContent = entry.label;
+      row.appendChild(swatch);
+      row.appendChild(label);
+      el.appendChild(row);
+    }
+  })();
+
+  let dpr = window.devicePixelRatio || 1;
+  let width = window.innerWidth;
+  let height = window.innerHeight;
+  let transform = d3.zoomIdentity;
+
+  function radius(d) { return 8 + 2 * (d.degree || 0); }
+  function showLabels() { return nodes.length <= 300 || transform.k > 1.3; }
+
+  const simulation = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(links).id(d => d.id).distance(100))
+    .force("charge", d3.forceManyBody().strength(-250))
+    .force("center", d3.forceCenter(width / 2, height / 2))
+    .force("collision", d3.forceCollide().radius(d => radius(d) + 4));
+
+  function resize() {
+    dpr = window.devicePixelRatio || 1;
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    canvas.style.width = width + "px";
+    canvas.style.height = height + "px";
+    simulation.force("center", d3.forceCenter(width / 2, height / 2));
+    draw();
   }
-})();
+  window.addEventListener("resize", resize, listening);
 
-let dpr = window.devicePixelRatio || 1;
-let width = window.innerWidth;
-let height = window.innerHeight;
-let transform = d3.zoomIdentity;
+  function draw() {
+    if (events.signal.aborted) return;
+    ctx.save();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.scale(dpr, dpr);
+    ctx.translate(transform.x, transform.y);
+    ctx.scale(transform.k, transform.k);
 
-function radius(d) { return 8 + 2 * (d.degree || 0); }
-function showLabels() { return nodes.length <= 300 || transform.k > 1.3; }
-
-const simulation = d3.forceSimulation(nodes)
-  .force("link", d3.forceLink(links).id(d => d.id).distance(100))
-  .force("charge", d3.forceManyBody().strength(-250))
-  .force("center", d3.forceCenter(width / 2, height / 2))
-  .force("collision", d3.forceCollide().radius(d => radius(d) + 4));
-
-function resize() {
-  dpr = window.devicePixelRatio || 1;
-  width = window.innerWidth;
-  height = window.innerHeight;
-  canvas.width = width * dpr;
-  canvas.height = height * dpr;
-  canvas.style.width = width + "px";
-  canvas.style.height = height + "px";
-  simulation.force("center", d3.forceCenter(width / 2, height / 2));
-  draw();
-}
-window.addEventListener("resize", resize);
-
-function draw() {
-  ctx.save();
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.scale(dpr, dpr);
-  ctx.translate(transform.x, transform.y);
-  ctx.scale(transform.k, transform.k);
-
-  // Edges (directed): line + arrowhead at the target boundary.
-  ctx.lineWidth = 1;
-  ctx.strokeStyle = "rgba(180,180,180,0.35)";
-  ctx.fillStyle = "rgba(180,180,180,0.55)";
-  for (const l of links) {
-    const s = l.source, t = l.target;
-    if (s.x == null || t.x == null) continue;
-    const dx = t.x - s.x, dy = t.y - s.y;
-    const dist = Math.hypot(dx, dy) || 1;
-    const ux = dx / dist, uy = dy / dist;
-    const tr = radius(t);
-    const ex = t.x - ux * tr, ey = t.y - uy * tr;  // stop at the target circle's edge
-    ctx.beginPath();
-    ctx.moveTo(s.x, s.y);
-    ctx.lineTo(ex, ey);
-    ctx.stroke();
-    // Arrowhead
-    const a = 5, spread = 0.5;
-    ctx.beginPath();
-    ctx.moveTo(ex, ey);
-    ctx.lineTo(ex - a * Math.cos(Math.atan2(uy, ux) - spread), ey - a * Math.sin(Math.atan2(uy, ux) - spread));
-    ctx.lineTo(ex - a * Math.cos(Math.atan2(uy, ux) + spread), ey - a * Math.sin(Math.atan2(uy, ux) + spread));
-    ctx.closePath();
-    ctx.fill();
-  }
-
-  // Nodes
-  for (const n of nodes) {
-    if (n.x == null) continue;
-    const r = radius(n);
-    ctx.beginPath();
-    ctx.arc(n.x, n.y, r, 0, 2 * Math.PI);
-    ctx.fillStyle = n.color;
-    ctx.fill();
+    // Edges (directed): line + arrowhead at the target boundary.
     ctx.lineWidth = 1;
-    ctx.strokeStyle = "rgba(0,0,0,0.4)";
-    ctx.stroke();
-  }
+    ctx.strokeStyle = "rgba(180,180,180,0.35)";
+    ctx.fillStyle = "rgba(180,180,180,0.55)";
+    for (const l of links) {
+      const s = l.source, t = l.target;
+      if (s.x == null || t.x == null) continue;
+      const dx = t.x - s.x, dy = t.y - s.y;
+      const dist = Math.hypot(dx, dy) || 1;
+      const ux = dx / dist, uy = dy / dist;
+      const tr = radius(t);
+      const ex = t.x - ux * tr, ey = t.y - uy * tr;  // stop at the target circle's edge
+      ctx.beginPath();
+      ctx.moveTo(s.x, s.y);
+      ctx.lineTo(ex, ey);
+      ctx.stroke();
+      // Arrowhead
+      const a = 5, spread = 0.5;
+      ctx.beginPath();
+      ctx.moveTo(ex, ey);
+      ctx.lineTo(ex - a * Math.cos(Math.atan2(uy, ux) - spread), ey - a * Math.sin(Math.atan2(uy, ux) - spread));
+      ctx.lineTo(ex - a * Math.cos(Math.atan2(uy, ux) + spread), ey - a * Math.sin(Math.atan2(uy, ux) + spread));
+      ctx.closePath();
+      ctx.fill();
+    }
 
-  // Labels (skipped on large graphs when zoomed out, to keep repaints cheap)
-  if (showLabels()) {
-    ctx.fillStyle = "#eaeaea";
-    ctx.font = "11px -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
-    ctx.textBaseline = "middle";
+    // Nodes
     for (const n of nodes) {
       if (n.x == null) continue;
-      ctx.fillText(n.label, n.x + radius(n) + 3, n.y);
+      const r = radius(n);
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, r, 0, 2 * Math.PI);
+      ctx.fillStyle = n.color;
+      ctx.fill();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = "rgba(0,0,0,0.4)";
+      ctx.stroke();
     }
-  }
-  ctx.restore();
-}
 
-// --- Hit-testing (pointer -> graph coordinates via the inverse zoom transform) ---
-function nodeAt(mx, my) {
-  const [px, py] = transform.invert([mx, my]);
-  for (let i = nodes.length - 1; i >= 0; i--) {
-    const n = nodes[i];
-    if (n.x == null) continue;
-    const dx = px - n.x, dy = py - n.y, r = radius(n);
-    if (dx * dx + dy * dy <= r * r) return n;
+    // Labels (skipped on large graphs when zoomed out, to keep repaints cheap)
+    if (showLabels()) {
+      ctx.fillStyle = "#eaeaea";
+      ctx.font = "11px -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+      ctx.textBaseline = "middle";
+      for (const n of nodes) {
+        if (n.x == null) continue;
+        ctx.fillText(n.label, n.x + radius(n) + 3, n.y);
+      }
+    }
+    ctx.restore();
   }
-  return null;
-}
-function distToSegment(px, py, a, b) {
-  const vx = b.x - a.x, vy = b.y - a.y;
-  const wx = px - a.x, wy = py - a.y;
-  const len2 = vx * vx + vy * vy;
-  let t = len2 ? (wx * vx + wy * vy) / len2 : 0;
-  t = Math.max(0, Math.min(1, t));
-  const cx = a.x + t * vx, cy = a.y + t * vy;
-  return Math.hypot(px - cx, py - cy);
-}
-function linkAt(mx, my) {
-  const [px, py] = transform.invert([mx, my]);
-  const tol = 4 / transform.k;
-  for (const l of links) {
-    if (l.source.x == null || l.target.x == null) continue;
-    if (distToSegment(px, py, l.source, l.target) <= tol) return l;
-  }
-  return null;
-}
 
-canvas.addEventListener("mousemove", (event) => {
-  const rect = canvas.getBoundingClientRect();
-  const mx = event.clientX - rect.left, my = event.clientY - rect.top;
-  const hit = nodeAt(mx, my) || linkAt(mx, my);
-  if (hit && hit.tooltip) {
-    tooltip.textContent = hit.tooltip;
-    tooltip.style.display = "block";
-    tooltip.style.left = (event.clientX + 12) + "px";
-    tooltip.style.top = (event.clientY + 12) + "px";
+  // --- Hit-testing (pointer -> graph coordinates via the inverse zoom transform) ---
+  function nodeAt(mx, my) {
+    const [px, py] = transform.invert([mx, my]);
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      const n = nodes[i];
+      if (n.x == null) continue;
+      const dx = px - n.x, dy = py - n.y, r = radius(n);
+      if (dx * dx + dy * dy <= r * r) return n;
+    }
+    return null;
+  }
+  function distToSegment(px, py, a, b) {
+    const vx = b.x - a.x, vy = b.y - a.y;
+    const wx = px - a.x, wy = py - a.y;
+    const len2 = vx * vx + vy * vy;
+    let t = len2 ? (wx * vx + wy * vy) / len2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    const cx = a.x + t * vx, cy = a.y + t * vy;
+    return Math.hypot(px - cx, py - cy);
+  }
+  function linkAt(mx, my) {
+    const [px, py] = transform.invert([mx, my]);
+    const tol = 4 / transform.k;
+    for (const l of links) {
+      if (l.source.x == null || l.target.x == null) continue;
+      if (distToSegment(px, py, l.source, l.target) <= tol) return l;
+    }
+    return null;
+  }
+
+  canvas.addEventListener("mousemove", (event) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = event.clientX - rect.left, my = event.clientY - rect.top;
+    const hit = nodeAt(mx, my) || linkAt(mx, my);
+    if (hit && hit.tooltip) {
+      tooltip.textContent = hit.tooltip;
+      tooltip.style.display = "block";
+      tooltip.style.left = (event.clientX + 12) + "px";
+      tooltip.style.top = (event.clientY + 12) + "px";
+    } else {
+      tooltip.style.display = "none";
+    }
+  }, listening);
+  canvas.addEventListener("mouseleave", () => { tooltip.style.display = "none"; }, listening);
+
+  // --- Zoom / pan (background) ---
+  d3.select(canvas).call(
+    d3.zoom()
+      .scaleExtent([0.1, 5])
+      .filter((event) => {
+        // Wheel/dblclick always zoom; a mousedown on a node is left to the drag handler.
+        if (event.type === "wheel" || event.type === "dblclick") return true;
+        const rect = canvas.getBoundingClientRect();
+        return !nodeAt(event.clientX - rect.left, event.clientY - rect.top);
+      })
+      .on("zoom", (event) => { transform = event.transform; draw(); })
+  );
+
+  // --- Node dragging ---
+  d3.select(canvas).call(
+    d3.drag()
+      .subject((event) => nodeAt(event.x, event.y))
+      .on("start", (event) => {
+        if (!event.subject) return;
+        if (PHYSICS) simulation.alphaTarget(0.3).restart();
+        const [gx, gy] = transform.invert([event.x, event.y]);
+        event.subject.fx = gx;
+        event.subject.fy = gy;
+      })
+      .on("drag", (event) => {
+        if (!event.subject) return;
+        const [gx, gy] = transform.invert([event.x, event.y]);
+        event.subject.fx = gx;
+        event.subject.fy = gy;
+        if (!PHYSICS) draw();
+      })
+      .on("end", (event) => {
+        if (!event.subject) return;
+        if (PHYSICS) simulation.alphaTarget(0);
+        event.subject.fx = null;
+        event.subject.fy = null;
+      })
+  );
+
+  // --- Run the layout ---
+  if (PHYSICS) {
+    simulation.on("tick", draw);
   } else {
-    tooltip.style.display = "none";
+    simulation.stop();
+    for (let i = 0; i < 300; i++) simulation.tick();
+    draw();
   }
-});
-canvas.addEventListener("mouseleave", () => { tooltip.style.display = "none"; });
+  resize();
 
-// --- Zoom / pan (background) ---
-d3.select(canvas).call(
-  d3.zoom()
-    .scaleExtent([0.1, 5])
-    .filter((event) => {
-      // Wheel/dblclick always zoom; a mousedown on a node is left to the drag handler.
-      if (event.type === "wheel" || event.type === "dblclick") return true;
-      const rect = canvas.getBoundingClientRect();
-      return !nodeAt(event.clientX - rect.left, event.clientY - rect.top);
-    })
-    .on("zoom", (event) => { transform = event.transform; draw(); })
-);
-
-// --- Node dragging ---
-d3.select(canvas).call(
-  d3.drag()
-    .subject((event) => nodeAt(event.x, event.y))
-    .on("start", (event) => {
-      if (!event.subject) return;
-      if (PHYSICS) simulation.alphaTarget(0.3).restart();
-      const [gx, gy] = transform.invert([event.x, event.y]);
-      event.subject.fx = gx;
-      event.subject.fy = gy;
-    })
-    .on("drag", (event) => {
-      if (!event.subject) return;
-      const [gx, gy] = transform.invert([event.x, event.y]);
-      event.subject.fx = gx;
-      event.subject.fy = gy;
-      if (!PHYSICS) draw();
-    })
-    .on("end", (event) => {
-      if (!event.subject) return;
-      if (PHYSICS) simulation.alphaTarget(0);
-      event.subject.fx = null;
-      event.subject.fy = null;
-    })
-);
-
-// --- Run the layout ---
-if (PHYSICS) {
-  simulation.on("tick", draw);
-} else {
-  simulation.stop();
-  for (let i = 0; i < 300; i++) simulation.tick();
-  draw();
+  return () => {
+    events.abort();
+    simulation.stop();
+    d3.select(canvas).on(".zoom", null).on(".drag", null).property("__zoom", null);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    tooltip.style.display = "none";
+    legend.replaceChildren();
+    legend.style.display = "none";
+  };
 }
-resize();
+__INITIALIZE__
 </script>
 </body>
 </html>
 """
 
 
-def _build_graph_html(kg, physics: bool) -> str:
-    """Render a KnowledgeGraph (LightRAG) into a self-contained interactive HTML page using D3.js
-    v7 force layout drawn on an HTML <canvas>.
-
-    Nodes are colored by entity type and sized by their connection degree; hovering a node or edge
-    reveals its full properties via an overlay tooltip. The vendored `d3.v7.min.js` is inlined, so
-    the returned HTML is a single self-contained, offline-capable document. `physics=False` settles
-    the layout synchronously and renders a static graph; `physics=True` animates it live."""
+def graph_viewer_payload(kg, physics: bool) -> dict:
+    """Project the selected graph into the shared canvas renderer's input."""
     # Degree from the edge list (undirected count — both endpoints).
     degree: dict[str, int] = {}
     for e in kg.edges:
@@ -420,16 +431,54 @@ def _build_graph_html(kg, physics: bool) -> str:
     # Legend entries (entity type -> color), in the same sorted order as the color mapping.
     legend = [{"label": t, "color": color_of[t]} for t in types]
 
-    # Script-safe embedding: neutralize any "</..." that could close the <script> element early.
-    data_json = json.dumps({"nodes": nodes, "links": links}).replace("</", "<\\/")
-    legend_json = json.dumps(legend).replace("</", "<\\/")
+    return {"nodes": nodes, "links": links, "legend": legend, "physics": physics}
 
-    # Fill the small placeholders first, then insert the large D3/data blobs, so a later
-    # replace can never match a token that happens to occur inside embedded content.
-    return (
-        _HTML_TEMPLATE.replace("__PHYSICS__", "true" if physics else "false")
-        .replace("__BGCOLOR__", _BGCOLOR)
-        .replace("__LEGEND_JSON__", legend_json)
-        .replace("__DATA_JSON__", data_json)
-        .replace("__D3_SOURCE__", _d3_source())
+
+def _viewer_document(initializer: str, *, style: str = "", status: str = "") -> str:
+    values = {
+        "__BGCOLOR__": _BGCOLOR,
+        "__D3_SOURCE__": _d3_source(),
+        "__INITIALIZE__": initializer,
+        "__EXTRA_STYLE__": style,
+        "__STATUS__": status,
+    }
+    return re.sub(r"__[A-Z0-9_]+__", lambda m: values.get(m[0], m[0]), _HTML_TEMPLATE)
+
+
+def _script_json(value) -> str:
+    # Prevent closing the containing script element through graph data.
+    return json.dumps(value).replace("</", "<\\/")
+
+
+def render_graph_snapshot(payload: dict) -> str:
+    data_json = _script_json({"nodes": payload["nodes"], "links": payload["links"]})
+    physics_json = _script_json(payload["physics"])
+    legend_json = _script_json(payload["legend"])
+    return _viewer_document(
+        f"const DATA = {data_json};\n"
+        f"const PHYSICS = {physics_json};\n"
+        f"const LEGEND = {legend_json};\n"
+        "renderGraph(DATA, PHYSICS, LEGEND);"
+    )
+
+
+def _build_graph_html(kg, physics: bool) -> str:
+    return render_graph_snapshot(graph_viewer_payload(kg, physics))
+
+
+@lru_cache(maxsize=1)
+def graph_app_html() -> str:
+    bridge = Path(__file__).with_name("graph_app.js").read_text(encoding="utf-8")
+    return _viewer_document(
+        bridge,
+        style="""
+  #hint { display: none; }
+  #status {
+    position: fixed; inset: 12px; height: fit-content;
+    color: #eaeaea; background: #1a1a1a;
+    font: 13px system-ui, sans-serif; overflow-wrap: anywhere;
+  }
+  #status button { display: block; margin-top: 8px; }
+""",
+        status='<div id="status" role="status">Waiting for the workspace graph.</div>',
     )

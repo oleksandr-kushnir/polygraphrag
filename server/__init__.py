@@ -4,6 +4,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from raganything import RAGAnything
+from starlette.routing import Route
 
 # Re-exported (not used here): server.auth reads the token set as server.API_TOKENS at call time,
 # and the test suite toggles auth by setting this attribute.
@@ -27,6 +28,7 @@ _job_queue: asyncio.Queue = asyncio.Queue()
 _jobs: dict[str, dict] = {}
 _batches: dict[str, list] = {}
 _db_pool = None  # asyncpg.Pool, set in lifespan
+_graph_pool = None  # set after the editable graph schema is initialized
 
 # Per-workspace RAGAnything instance registry. Keyed by PUBLIC workspace id.
 _rag_instances: dict[str, RAGAnything] = {}
@@ -53,9 +55,11 @@ from server.db import (
 from server.db import (
     _db_update_status as _db_update_status,
 )
+from server.embeddings import embedding_worker  # noqa: E402
 from server.ingest import (  # noqa: E402
     _process_file as _process_file,
 )
+from server.mcp import MCPTransport, create_session_manager  # noqa: E402
 from server.worker import (  # noqa: E402
     _db_reload_jobs,
     _worker,
@@ -63,7 +67,7 @@ from server.worker import (  # noqa: E402
 from server.worker import (
     _process_job as _process_job,
 )
-from server.workspaces import get_workspace_rag  # noqa: E402
+from server.workspaces import get_workspace_rag as get_workspace_rag  # noqa: E402
 
 # --- Startup / shutdown ---
 
@@ -73,6 +77,7 @@ async def lifespan(app: FastAPI):
     global _db_pool
     import asyncpg
 
+    app.state.mcp_manager = create_session_manager()
     Path(WORKING_DIR).mkdir(parents=True, exist_ok=True)
 
     _db_pool = await asyncpg.create_pool(
@@ -87,35 +92,34 @@ async def lifespan(app: FastAPI):
     await _db_init(_db_pool)
     await _db_reload_jobs(_db_pool)
 
-    # Pre-warm the oldest active workspace so an existing corpus is ready immediately; the rest
-    # build lazily on first use via get_workspace_rag(). Best-effort — an empty registry (nothing
-    # seeded/created yet) simply skips pre-warming rather than crashing startup.
-    _prewarm_row = await _db_pool.fetchrow(
-        "SELECT id FROM rag_workspaces WHERE deleted_at IS NULL ORDER BY created_at LIMIT 1"
-    )
-    if _prewarm_row is not None:
-        await get_workspace_rag(_prewarm_row["id"])
-
     worker_task = asyncio.create_task(_worker())
-    yield
-    worker_task.cancel()
-    for instance in list(_rag_instances.values()):
-        await instance.lightrag.finalize_storages()
-    _rag_instances.clear()
-    _ws_locks.clear()
-    await _db_pool.close()
-    _db_pool = None
+    embedding_task = asyncio.create_task(embedding_worker(_db_pool))
+    try:
+        async with app.state.mcp_manager.run():
+            yield
+    finally:
+        worker_task.cancel()
+        embedding_task.cancel()
+        await asyncio.gather(worker_task, embedding_task, return_exceptions=True)
+        for instance in list(_rag_instances.values()):
+            await instance.lightrag.finalize_storages()
+        _rag_instances.clear()
+        _ws_locks.clear()
+        await _db_pool.close()
+        _db_pool = None
 
 
 app = FastAPI(
     title="PolyGraphRAG",
+    # Stateless MCP tools return one JSON response per POST. GET returns 405.
+    routes=[Route("/mcp", MCPTransport(), methods=["POST"], include_in_schema=False)],
     version="0.1.0",  # keep in sync with pyproject.toml
     description=(
         "Multimodal RAG service over a Postgres/AGE-backed LightRAG knowledge store. "
         "Documents are ingested per **workspace** (an isolated knowledge graph + vector index); "
         "each workspace is addressed by its public slug id under `/workspace/{workspace_id}/...`. "
-        "Upload files, query the corpus (with citations), or render the knowledge graph as an "
-        "interactive HTML page.\n\n"
+        "Upload files, edit the graph directly, query the corpus with citations, or render the "
+        "graph as an interactive HTML page.\n\n"
         "**Scope:** a single-instance, low-usage service — run exactly one worker/replica "
         "(ingest job state is in-process); it is not designed for high load or horizontal "
         "scaling. **Auth:** disabled by default (ports are loopback-only). Set `API_TOKENS` "
@@ -132,7 +136,9 @@ app = FastAPI(
 # covers the auto-generated docs. It reads server.API_TOKENS live, so tests toggle auth by setting
 # that attribute.
 from server.auth import _require_auth  # noqa: E402
+from server.compression import NegotiatedGZip  # noqa: E402
 
+app.add_middleware(NegotiatedGZip)
 app.middleware("http")(_require_auth)
 
 
@@ -167,7 +173,7 @@ def _custom_openapi() -> dict:
     return schema
 
 
-app.openapi = _custom_openapi
+app.openapi = _custom_openapi  # type: ignore[method-assign]
 
 
 @app.get(
@@ -185,6 +191,7 @@ async def root():
         "version": app.version,
         "docs": "/docs",
         "openapi": "/openapi.json",
+        "mcp": "/mcp",
         "health": "/health",
     }
 
@@ -206,9 +213,11 @@ async def health():
 # Endpoints live in server.routers.*; included here. They call the workspace registry via
 # server.get_workspace_rag (attribute access at call time) so test patches are honoured.
 from server.routers import documents as _documents_router  # noqa: E402
+from server.routers import graph as _graph_router  # noqa: E402
 from server.routers import query as _query_router  # noqa: E402
 from server.routers import workspaces as _workspaces_router  # noqa: E402
 
 app.include_router(_query_router.router)
 app.include_router(_documents_router.router)
+app.include_router(_graph_router.router)
 app.include_router(_workspaces_router.router)

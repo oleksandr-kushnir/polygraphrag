@@ -17,9 +17,15 @@ run fast with no container, DB, or API keys. The live-container equivalent is
 
 import asyncio
 import base64
+import gzip
 import io
+import json
+import sys
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import pytest_asyncio
@@ -29,8 +35,12 @@ import pytest_asyncio
 # stubs here would shadow the QueryParam object test_server introspects (whichever module imports
 # first wins), so we deliberately share one set instead of duplicating it.
 import test_server as _ts  # noqa: E402
+from httpx import ASGITransport, AsyncClient
+from mcp import ClientSession, types
+from mcp.client.streamable_http import streamable_http_client
 
 import server  # noqa: E402
+from server import config, graph_viewer, mcp_viewer
 
 rag_stub = _ts.rag_stub
 _AnyKeyDocs = _ts._AnyKeyDocs
@@ -41,6 +51,46 @@ _AQUERY_DATA = _ts._DEFAULT_AQUERY_DATA
 # Fixtures & helpers
 # --------------------------------------------------------------------------- #
 WS = "/workspace/alex"  # primary public workspace → physical "alex" via the lookup stub
+MCP_URL = "http://polygraphrag:9622"
+MCP_HEADERS = {"Accept": "application/json, text/event-stream"}
+READ_TOOLS = {
+    "ask_workspace",
+    "find_graph_entities",
+    "get_embedding_consistency",
+    "get_graph_entity",
+    "get_graph_neighbors",
+    "get_graph_relationship",
+    "get_ingest_job",
+    "get_workspace_overview",
+    "list_workspaces",
+    "retrieve_graph",
+    "search_workspace",
+    "show_workspace_graph",
+}
+WRITE_TOOLS = {"write_graph_batch", "patch_graph_entity", "patch_graph_relationship"}
+
+
+@asynccontextmanager
+async def _mcp_client():
+    manager = server.create_session_manager()
+    server.app.state.mcp_manager = manager
+    async with (
+        manager.run(),
+        AsyncClient(transport=ASGITransport(app=server.app), base_url=MCP_URL) as http,
+        streamable_http_client(f"{MCP_URL}/mcp", http_client=http) as (reader, writer, _),
+        ClientSession(reader, writer) as agent,
+    ):
+        await agent.initialize()
+        yield http, agent
+
+
+def _mcp_error(result):
+    assert result.isError
+    return json.loads(result.content[0].text)
+
+
+def _mcp_request(method, **params):
+    return {"jsonrpc": "2.0", "id": 5, "method": method, "params": params}
 
 
 async def _fake_lookup_workspace(workspace_id):
@@ -90,8 +140,6 @@ def reset_server_state():
 async def client():
     """Async httpx client over the real ASGI app, with the workspace registry lookup and the
     per-workspace RAG instance stubbed so ``/workspace/{id}/...`` routes resolve without a DB."""
-    from httpx import ASGITransport, AsyncClient
-
     orig_lookup = server.workspaces._lookup_workspace
     orig_get = server.get_workspace_rag
     server.workspaces._lookup_workspace = _fake_lookup_workspace
@@ -170,6 +218,8 @@ class _StatefulRegistryPool:
             return dict(self._rows[wid])
         if "FROM rag_workspaces WHERE id = $1" in sql:
             row = self._rows.get(args[0])
+            if row and "deleted_at IS NULL" in sql and row["deleted_at"] is not None:
+                return None
             return dict(row) if row else None
         return None
 
@@ -183,6 +233,405 @@ class _StatefulRegistryPool:
 
     async def fetchval(self, sql: str, *args):
         return None  # chunk sums, last-upload, and vdb table discovery all resolve to empty
+
+
+async def test_mcp_agent_discovery_search_and_cited_answer(monkeypatch, tmp_path):
+    pool = _StatefulRegistryPool()
+    pool.close = AsyncMock()
+    monkeypatch.setitem(
+        sys.modules, "asyncpg", SimpleNamespace(create_pool=AsyncMock(return_value=pool))
+    )
+    monkeypatch.setattr(server, "WORKING_DIR", str(tmp_path))
+    monkeypatch.setattr(server, "_db_init", AsyncMock())
+    monkeypatch.setattr(server, "_db_reload_jobs", AsyncMock())
+    monkeypatch.setattr(server, "_worker", AsyncMock())
+    monkeypatch.setattr(server, "API_TOKENS", ["agent-token"])
+    monkeypatch.setattr(config, "MCP_GRAPH_WRITES", False)
+
+    # Both workspaces use the same internal citation key; only the scoped metadata differs.
+    key = "abc123_refunds.md"
+
+    async def scoped_metadata(pool, keys, phys):
+        return {key: {"file": "refunds.md", "file_path": f"/{phys}/refunds.md"}}
+
+    monkeypatch.setattr(server.references, "_db_fetch_metadata_by_key", scoped_metadata)
+
+    async def get_instance(wid):
+        rag = MagicMock()
+        references = [{"reference_id": "1", "file_path": key}]
+        rag.lightrag.aquery_data = AsyncMock(
+            return_value={
+                "data": {"references": references, "chunks": [{"content": wid, "file_path": key}]}
+            }
+        )
+        rag.lightrag.aquery_llm = AsyncMock(
+            return_value={
+                "data": {"references": references},
+                "llm_response": {"content": f"{wid} cites {key}"},
+            }
+        )
+        return rag
+
+    monkeypatch.setattr(server, "get_workspace_rag", get_instance)
+    url = "http://polygraphrag:9622"
+    async with (
+        server.lifespan(server.app),
+        AsyncClient(
+            transport=ASGITransport(app=server.app),
+            base_url=url,
+            headers={"Authorization": "Bearer agent-token"},
+        ) as http,
+        streamable_http_client(f"{url}/mcp", http_client=http) as (reader, writer, _),
+        ClientSession(reader, writer) as agent,
+    ):
+        for wid in ("alpha", "beta", "retired"):
+            assert (
+                await http.post("/all-workspaces/create", json={"id": wid, "name": wid})
+            ).is_success
+        assert (await http.delete("/workspace/retired")).is_success
+        await agent.initialize()
+        tools = (await agent.list_tools()).tools
+        assert {t.name for t in tools} == READ_TOOLS
+        assert all(t.annotations.readOnlyHint for t in tools)
+        assert _mcp_error(await agent.call_tool("write_graph_batch", {}))["code"] == "unknown_tool"
+        listed = await agent.call_tool("list_workspaces", {})
+        assert listed.structuredContent == (await http.get("/all-workspaces/list")).json()
+        assert [w["id"] for w in listed.structuredContent["workspaces"]] == ["alpha", "beta"]
+        for wid in ("alpha", "beta"):
+            overview = await agent.call_tool("get_workspace_overview", {"workspace_id": wid})
+            assert overview.structuredContent == (await http.get(f"/workspace/{wid}")).json()
+            question = {"query": "What are the refund terms?"}
+            search = {**question, "file_path_contains": [f"/{wid}/"]}
+            evidence = await agent.call_tool("search_workspace", {"workspace_id": wid, **search})
+            rest_search = await http.post(f"/workspace/{wid}/query/data", json=search)
+            assert evidence.structuredContent == rest_search.json()
+            assert evidence.structuredContent["data"]["chunks"] == [
+                {"content": wid, "file_path": f"/{wid}/refunds.md"}
+            ]
+            answer = await agent.call_tool("ask_workspace", {"workspace_id": wid, **question})
+            rest_answer = await http.post(f"/workspace/{wid}/query", json=question)
+            assert answer.structuredContent == rest_answer.json()
+            assert answer.structuredContent["result"] == f"{wid} cites refunds.md"
+            assert answer.structuredContent["references"][0]["file_path"] == f"/{wid}/refunds.md"
+        for invalid_args in (
+            {"workspace_id": "retired"},
+            {"workspace_id": "unknown"},
+            {"workspace_id": "alpha", "top_k": 0},
+            {},
+        ):
+            failure = await agent.call_tool("ask_workspace", {"query": "refunds", **invalid_args})
+            assert failure.isError
+        for wid in ("retired", "unknown"):
+            for delivery in ("auto", "html", "link"):
+                failure = await agent.call_tool(
+                    "show_workspace_graph", {"workspace_id": wid, "delivery": delivery}
+                )
+                assert _mcp_error(failure)["code"] == "workspace_not_found"
+
+
+async def _raw_response(http, method, path, coding, **kwargs):
+    async with http.stream(
+        method, path, headers=MCP_HEADERS | {"Accept-Encoding": coding}, **kwargs
+    ) as response:
+        response.raise_for_status()
+        wire = b"".join([chunk async for chunk in response.aiter_raw()])
+        assert int(response.headers["Content-Length"]) == len(wire)
+        return response.headers, wire
+
+
+async def test_mcp_ingest_job_is_workspace_scoped_and_omits_private_error(monkeypatch, client):
+    def failed_job(workspace):
+        return {
+            "workspace": workspace,
+            "status": "failed",
+            "attempts": 2,
+            "error": "private database exception",
+            "job_id": "persisted",
+            "file": "original.md",
+            "uploaded_at": datetime.now(timezone.utc),
+        }
+
+    async def fetchrow(_sql, job_id, workspace):
+        job = failed_job("alex")
+        return job if (job_id, workspace) == ("persisted", job["workspace"]) else None
+
+    monkeypatch.setattr(server, "_db_pool", SimpleNamespace(fetchrow=fetchrow))
+    server._jobs["memory"] = failed_job("alex")
+    async with _mcp_client() as (_, agent):
+        for job_id in ("memory", "persisted"):
+            result = await agent.call_tool(
+                "get_ingest_job", {"workspace_id": "alex", "job_id": job_id}
+            )
+            assert not result.isError
+            assert result.structuredContent == {"job_id": job_id, "status": "failed", "attempts": 2}
+            assert "private database exception" not in result.model_dump_json()
+            failure = await agent.call_tool(
+                "get_ingest_job", {"workspace_id": "other", "job_id": job_id}
+            )
+            assert _mcp_error(failure)["code"] == "job_not_found"
+
+
+async def test_mcp_writes_flat_patch_contract_and_auth(monkeypatch, client):
+    monkeypatch.setattr(config, "MCP_GRAPH_WRITES", True)
+    monkeypatch.setattr(server, "API_TOKENS", ["agent-token"])
+    common = {
+        "description": "same",
+        "type": "Fact",
+        "revision": 2,
+        "origins": ["manual"],
+        "sources": [],
+    }
+    entity = {"id": "clocktower", "name": "Wren Clocktower", **common}
+    edge = {
+        "id": "storage",
+        "source": "clocktower",
+        "target": "map",
+        "direction": "directed",
+        **common,
+    }
+    record = AsyncMock(side_effect=[(entity, False), (entity, False), (edge, False), (edge, False)])
+    monkeypatch.setattr(server.mcp, "write_graph_record", record)
+    monkeypatch.setattr(server.routers.graph, "write_graph_record", record)
+    manager = server.create_session_manager()
+    server.app.state.mcp_manager = manager
+    async with (
+        manager.run(),
+        AsyncClient(
+            transport=ASGITransport(app=server.app), base_url=MCP_URL, headers=MCP_HEADERS
+        ) as http,
+    ):
+        listing = _mcp_request("tools/list")
+        headers = {"Authorization": "Bearer agent-token"}
+        listed = await http.post("/mcp", json=listing, headers=headers)
+        definitions = {tool["name"]: tool for tool in listed.json()["result"]["tools"]}
+        assert set(definitions) == READ_TOOLS | WRITE_TOOLS
+        for name in WRITE_TOOLS:
+            assert definitions[name]["annotations"]["readOnlyHint"] is False
+            assert definitions[name]["annotations"]["destructiveHint"] is True
+
+        for name, id_field, item, path in (
+            ("patch_graph_entity", "entity_id", entity, "entities"),
+            ("patch_graph_relationship", "edge_id", edge, "relationships"),
+        ):
+            assert "expected_revision" in definitions[name]["inputSchema"]["required"]
+            arguments = {"workspace_id": "alex", id_field: item["id"], "expected_revision": 2}
+            for edit in ({}, {"unknown": False}, {"description": None}):
+                reply = await http.post(
+                    "/mcp",
+                    json=_mcp_request("tools/call", name=name, arguments=arguments | edit),
+                    headers=headers,
+                )
+                assert reply.json()["result"]["isError"]
+
+            changes = {"description": "same", "source_ref": None}
+            request = _mcp_request("tools/call", name=name, arguments=arguments | changes)
+            before = record.await_count
+            exclude = {"Accept-Encoding": "identity;q=0, gzip;q=0"}
+            assert (await http.post("/mcp", json=request, headers=exclude)).status_code == 401
+            rejected = await http.post("/mcp", json=request, headers=headers | exclude)
+            assert rejected.status_code == 406
+            assert rejected.content == b""
+            assert rejected.headers["Vary"] == "Accept-Encoding"
+            assert record.await_count == before
+
+            reply = await http.post("/mcp", json=request, headers=headers)
+            rest = await http.patch(
+                f"{WS}/graph/{path}/{item['id']}",
+                json={"expected_revision": 2, **changes},
+                headers=headers,
+            )
+            assert reply.json()["result"]["structuredContent"] == rest.json()
+            for call in record.await_args_list[before:]:
+                assert call.args[3].model_dump(exclude_unset=True) == {
+                    "expected_revision": 2,
+                    **changes,
+                }
+
+
+def _viewer_fixture():
+    return SimpleNamespace(
+        nodes=[
+            SimpleNamespace(
+                id="original",
+                labels=["Chart"],
+                properties={"entity_id": "Original </script>", "file_path": "/café/original.md"},
+            )
+        ],
+        edges=[],
+    )
+
+
+@pytest.mark.parametrize("editable", [False, True])
+async def test_mcp_graph_app_modes_and_rest_snapshot_parity(monkeypatch, client, editable):
+    selector = AsyncMock(side_effect=lambda *args, **kwargs: _viewer_fixture())
+    monkeypatch.setattr(graph_viewer, "graph_storage_ready", lambda: editable)
+    monkeypatch.setattr(graph_viewer, "effective_knowledge_graph", selector)
+    monkeypatch.setattr(rag_stub.lightrag, "get_knowledge_graph", selector)
+    monkeypatch.setattr(config, "MCP_VIEWER_BASE_URL", "https://example.org/rag/")
+    async with _mcp_client() as (http, agent):
+        # A second stateless client advertises Apps and fetches the declared UI resource.
+        init = _mcp_request(
+            "initialize",
+            protocolVersion="2025-11-25",
+            clientInfo={"name": "test-app-host", "version": "1"},
+            capabilities={
+                "extensions": {
+                    "io.modelcontextprotocol/ui": {"mimeTypes": [mcp_viewer.VIEWER_APP_MIME]}
+                }
+            },
+        )
+        assert (await http.post("/mcp", json=init, headers=MCP_HEADERS)).is_success
+        tools = {tool.name: tool for tool in (await agent.list_tools()).tools}
+        uri = tools["show_workspace_graph"].meta["ui"]["resourceUri"]
+        resource = (await agent.read_resource(mcp_viewer.VIEWER_APP_URI)).contents[0]
+        assert str(resource.uri) == uri
+        assert resource.mimeType == mcp_viewer.VIEWER_APP_MIME
+        assert "ui/notifications/tool-result" in resource.text
+        assert "Original" not in resource.text
+        assert "forceSimulation" in resource.text
+        filters = ["/café/", "a&b"]
+        args = {
+            "workspace_id": "alex",
+            "node_label": "Original",
+            "max_nodes": 1,
+            "physics": False,
+            "file_path_contains": filters,
+        }
+        linked = await agent.call_tool("show_workspace_graph", args | {"delivery": "link"})
+        selector.assert_not_awaited()
+        url = urlsplit(linked.structuredContent["viewer_url"])
+        assert url.path == "/rag/workspace/alex/graph.html"
+        assert parse_qs(url.query)["file_path_contains"] == filters
+        assert parse_qs(url.query)["physics"] == ["false"]
+
+        raw = _mcp_request("tools/call", name="show_workspace_graph", arguments=args)
+        with_app, plain = await asyncio.gather(
+            http.post("/mcp", json=raw, headers=MCP_HEADERS),
+            agent.call_tool("show_workspace_graph", args),
+        )
+        assert with_app.json()["result"] == plain.model_dump(by_alias=True, exclude_none=True)
+        assert plain.meta["polygraphrag/graph"]["nodes"][0]["label"] == "Original </script>"
+        assert len(plain.content) == 1
+
+        html = await agent.call_tool("show_workspace_graph", args | {"delivery": "html"})
+        rest = await http.get(f"{WS}/graph.html", params=url.query)
+        assert html.meta is None
+        assert html.content[1].resource.mimeType == "text/html"
+        assert html.content[1].resource.text == rest.text
+        assert "Original <\\/script>" in rest.text
+        assert "const PHYSICS = false" in rest.text
+        for method, endpoint, media_type, options in (
+            ("GET", f"{WS}/graph.html", "text/html", {"params": url.query}),
+            ("POST", "/mcp", "application/json", {"json": _mcp_request("tools/list")}),
+        ):
+            identity, plain_bytes = await _raw_response(
+                http, method, endpoint, "identity", **options
+            )
+            gzipped, wire = await _raw_response(http, method, endpoint, "gzip", **options)
+            assert "Content-Encoding" not in identity
+            assert gzipped["Content-Encoding"] == "gzip"
+            assert identity["Vary"] == gzipped["Vary"] == "Accept-Encoding"
+            assert identity["Content-Type"] == gzipped["Content-Type"]
+            assert gzipped["Content-Type"].startswith(media_type)
+            assert gzip.decompress(wire) == plain_bytes
+
+        expected_length = len(url.geturl()) + len("&file_path_contains=")
+        long_filter = "x" * (mcp_viewer.VIEWER_URL_BYTES - expected_length)
+        exact = args | {"delivery": "link", "file_path_contains": filters + [long_filter]}
+        at_limit = await agent.call_tool("show_workspace_graph", exact)
+        assert (
+            len(at_limit.structuredContent["viewer_url"].encode("ascii"))
+            == mcp_viewer.VIEWER_URL_BYTES
+        )
+        too_long = exact | {"file_path_contains": filters + [long_filter + "x"]}
+        failure = await agent.call_tool("show_workspace_graph", too_long)
+        assert _mcp_error(failure)["code"] == "viewer_url_too_long"
+        inline = await agent.call_tool("show_workspace_graph", too_long | {"delivery": "auto"})
+        assert "viewer_url" not in inline.structuredContent
+        assert 'delivery="html"' in inline.content[0].text
+
+        monkeypatch.setattr(server, "API_TOKENS", ["viewer-token"])
+        unauthenticated = await http.get(f"{WS}/graph.html", params=url.query)
+        assert unauthenticated.status_code == 401
+        assert unauthenticated.headers["WWW-Authenticate"].startswith("Basic ")
+        browser = await http.get(
+            f"{WS}/graph.html",
+            params=url.query,
+            headers={"Authorization": _basic("viewer", "viewer-token")},
+        )
+        assert browser.text == rest.text
+
+
+async def test_graph_result_budget_measures_uncompressed_serialized_result(monkeypatch, client):
+    monkeypatch.setattr(config, "MCP_VIEWER_BASE_URL", "")
+    monkeypatch.setattr(
+        mcp_viewer, "select_viewer_graph", AsyncMock(return_value=_viewer_fixture())
+    )
+    renderer = MagicMock(return_value="é")
+    monkeypatch.setattr(mcp_viewer, "render_graph_snapshot", renderer)
+    async with _mcp_client() as (http, agent):
+        inline = await agent.call_tool("show_workspace_graph", {"workspace_id": "alex"})
+        assert 'delivery="html"' in inline.content[0].text
+        link = await agent.call_tool(
+            "show_workspace_graph", {"workspace_id": "alex", "delivery": "link"}
+        )
+        assert _mcp_error(link)["code"] == "viewer_link_unavailable"
+
+        args = {"workspace_id": "alex", "delivery": "html"}
+        minimal = await agent.call_tool("show_workspace_graph", args)
+        length = len(minimal.model_dump_json(by_alias=True, exclude_none=True).encode())
+        renderer.return_value = "é" + "a" * (mcp_viewer.VIEWER_RESULT_BYTES - length)
+        request = _mcp_request("tools/call", name="show_workspace_graph", arguments=args)
+        async with http.stream(
+            "POST", "/mcp", json=request, headers=MCP_HEADERS | {"Accept-Encoding": "gzip"}
+        ) as res:
+            raw = b"".join([chunk async for chunk in res.aiter_raw()])
+            assert res.headers["Content-Encoding"] == "gzip"
+            assert int(res.headers["Content-Length"]) == len(raw)
+            decoded = gzip.decompress(raw)
+            assert len(decoded) > mcp_viewer.VIEWER_RESULT_BYTES
+            result = types.CallToolResult.model_validate(json.loads(decoded)["result"])
+            assert not result.isError
+            assert (
+                len(result.model_dump_json(by_alias=True, exclude_none=True).encode())
+                == mcp_viewer.VIEWER_RESULT_BYTES
+            )
+
+        renderer.return_value += "a"
+        failures = []
+        for coding in ("gzip", "identity"):
+            res = await http.post(
+                "/mcp", json=request, headers=MCP_HEADERS | {"Accept-Encoding": coding}
+            )
+            failures.append(_mcp_error(types.CallToolResult.model_validate(res.json()["result"])))
+        assert failures[0] == failures[1]
+        assert failures[0]["code"] == "viewer_result_too_large"
+        assert failures[0]["limit"] == mcp_viewer.VIEWER_RESULT_BYTES
+
+
+@pytest.mark.parametrize("base_url", ["", "https://example.org/rag"])
+async def test_oversized_mcp_inline_result_falls_back_to_configured_link(
+    monkeypatch, client, base_url
+):
+    monkeypatch.setattr(config, "MCP_VIEWER_BASE_URL", base_url)
+    monkeypatch.setattr(
+        mcp_viewer, "select_viewer_graph", AsyncMock(return_value=_viewer_fixture())
+    )
+    monkeypatch.setattr(mcp_viewer, "VIEWER_RESULT_BYTES", 1)
+    async with _mcp_client() as (_, agent):
+        inline = await agent.call_tool("show_workspace_graph", {"workspace_id": "alex"})
+        if base_url:
+            assert inline.structuredContent["representation"] == "link"
+            assert inline.structuredContent["viewer_url"].startswith(base_url)
+            assert inline.meta is None
+        else:
+            assert _mcp_error(inline)["code"] == "viewer_result_too_large"
+        html = await agent.call_tool(
+            "show_workspace_graph", {"workspace_id": "alex", "delivery": "html"}
+        )
+        failure = _mcp_error(html)
+        assert failure["code"] == "viewer_result_too_large"
+        assert ("viewer_url" in failure) is bool(base_url)
 
 
 # --------------------------------------------------------------------------- #

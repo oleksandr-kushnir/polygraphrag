@@ -5,6 +5,7 @@
 # `lightrag-hku` stack. These are the only packages needed to import server.py
 # under the test stubs and drive it with a FastAPI test client:
 fastapi
+mcp>=1.30,<2
 pydantic
 python-multipart
 numpy

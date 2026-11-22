@@ -61,6 +61,7 @@ does not modify these). No source disclosure is required.
 | raganything | MIT | https://github.com/HKUDS/RAG-Anything |
 | lightrag-hku | MIT | https://github.com/HKUDS/LightRAG |
 | fastapi | MIT | https://github.com/fastapi/fastapi |
+| mcp | MIT | https://github.com/modelcontextprotocol/python-sdk |
 | uvicorn | BSD-3-Clause | https://github.com/encode/uvicorn |
 | python-multipart | Apache-2.0 | https://github.com/Kludex/python-multipart |
 | asyncpg | Apache-2.0 | https://github.com/MagicStack/asyncpg |

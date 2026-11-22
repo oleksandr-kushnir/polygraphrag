@@ -8,11 +8,14 @@ runtime state and the functions the test suite patches are always the live ones;
 configuration is read from server.config.
 """
 
+import asyncio
 from pathlib import Path
 
 import server
 from server import config
-from server.ingest import _build_metadata
+from server.graph_store import graph_storage_ready, graph_transaction, refresh_extraction
+from server.ingest import _build_metadata, ingestion_roles
+from server.providers import available
 from server.references import _safe_ref_name
 from server.workspaces import _get_ws_lock
 
@@ -92,14 +95,28 @@ async def _process_job(
         rag_instance = await server.get_workspace_rag(workspace_id)
         lock = await _get_ws_lock(workspace_id)
         async with lock:
+            publish = graph_storage_ready()
+            ws = None
+            if publish:
+                ws = {"id": workspace_id, "lightrag_workspace": job["workspace"]}
+                async with graph_transaction(ws):
+                    pass
             result = await server._process_file(
                 dest, rag_instance, description_text=description_text, file_path=file_path
             )
-        # `_process_file` returns (doc_id, lightrag_key); tolerate a bare doc_id from older mocks.
-        doc_id, lightrag_key = result if isinstance(result, tuple) else (result, None)
+            # `_process_file` returns (doc_id, lightrag_key); tolerate a bare doc_id from older mocks.
+            doc_id, lightrag_key = result if isinstance(result, tuple) else (result, None)
+            if ws is not None:
+                async with graph_transaction(ws, write=True) as conn:
+                    if doc_id:
+                        await server._db_set_doc_id(conn, job_id, doc_id)
+                    if lightrag_key:
+                        await server._db_set_lightrag_key(conn, job_id, lightrag_key)
+                    await refresh_extraction(conn, ws)
+                    await server._db_update_status(conn, job_id, "done", job["attempts"], None)
         job["status"] = "done"
         job["doc_id"] = doc_id
-        if server._db_pool:
+        if server._db_pool and not graph_storage_ready():
             await server._db_update_status(server._db_pool, job_id, "done", job["attempts"], None)
             if doc_id:
                 await server._db_set_doc_id(server._db_pool, job_id, doc_id)
@@ -131,6 +148,14 @@ async def _worker():
     while True:
         workspace_id, job_id, dest, description_text, file_path = await server._job_queue.get()
         try:
+            if graph_storage_ready() and not all(
+                available(role) for role in ingestion_roles(dest.suffix.lower())
+            ):
+                await server._job_queue.put(
+                    (workspace_id, job_id, dest, description_text, file_path)
+                )
+                await asyncio.sleep(2)
+                continue
             await server._process_job(workspace_id, job_id, dest, description_text, file_path)
         finally:
             server._job_queue.task_done()

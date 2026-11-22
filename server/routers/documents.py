@@ -9,6 +9,7 @@ those names are honoured; stateless helpers import directly from their owning mo
 import hashlib
 import json
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi import Path as PathParam
@@ -16,7 +17,10 @@ from fastapi import Path as PathParam
 import server
 from server.db import _db_insert_job
 from server.deps import _batch_response, _internal_error, require_workspace
-from server.ingest import _build_metadata, _join_path
+from server.graph_store import graph_storage_ready, graph_transaction, refresh_extraction
+from server.ingest import _build_metadata, _join_path, ingestion_roles
+from server.jobs import _file_index_row, _job_public, lookup_ingest_job
+from server.providers import require_providers
 from server.references import _safe_ref_name
 from server.schemas import (
     BatchResponse,
@@ -103,6 +107,15 @@ async def upload_batch(
     files: list[UploadFile] = File(...),
     ws: dict = Depends(require_workspace),
 ):
+    if graph_storage_ready():
+        require_providers(
+            "upload.batch",
+            *dict.fromkeys(
+                role
+                for file in files
+                for role in ingestion_roles(Path(file.filename or "").suffix.lower())
+            ),
+        )
     pub = ws["id"]  # public id → routes the worker to the right instance
     phys = ws["lightrag_workspace"]  # physical workspace → storage namespace + metadata tag
     form = await request.form()
@@ -136,7 +149,8 @@ async def upload_batch(
     entries = []
     for i, file in enumerate(files):
         job_id = uuid.uuid4().hex[:8]
-        dest = _job_path(phys, job_id, file.filename)
+        filename = file.filename or "upload"
+        dest = _job_path(phys, job_id, filename)
         m = meta_list[i] if i < len(meta_list) else {}
         description = m.get("description", "") or ""
         source_path = m.get("source_path", "") or ""
@@ -154,11 +168,11 @@ async def upload_batch(
             #  - display_path: the REAL, openable path shown in references/`/files` — the caller's
             #    path_root/source_path join when given, else source_path, else the plain filename.
             #    Never the on-disk `{job_id}_` token.
-            lightrag_input = f"{job_id}_{_safe_ref_name(file.filename)}"
+            lightrag_input = f"{job_id}_{_safe_ref_name(filename)}"
             display_path = (
                 _join_path(path_root, source_path)
                 if (path_root and source_path)
-                else (source_path or _safe_ref_name(file.filename))
+                else (source_path or _safe_ref_name(filename))
             )
             description_text = _build_metadata(description, source_path, last_modified)
             record: dict = {
@@ -233,17 +247,7 @@ async def get_status(
     job_id: str = PathParam(description="Per-file job id returned by the upload endpoint."),
     ws: dict = Depends(require_workspace),
 ):
-    phys = ws["lightrag_workspace"]
-    job = server._jobs.get(job_id)
-    if job is not None and job.get("workspace") == phys:
-        return job
-    if server._db_pool:
-        row = await server._db_pool.fetchrow(
-            "SELECT * FROM rag_file_metadata WHERE job_id = $1 AND workspace = $2", job_id, phys
-        )
-        if row:
-            return _job_public(row)
-    raise HTTPException(404, f"Job {job_id!r} not found")
+    return await lookup_ingest_job(ws, job_id)
 
 
 @router.get(
@@ -263,34 +267,6 @@ async def list_jobs(ws: dict = Depends(require_workspace)):
         return {"jobs": [_job_public(r) for r in rows]}
     jobs = [j for j in server._jobs.values() if j.get("workspace") == phys]
     return {"jobs": jobs[-100:][::-1]}
-
-
-def _file_index_row(row) -> dict:
-    ua = row["uploaded_at"]
-    return {
-        "job_id": row["job_id"],
-        "file": row["file"],
-        "file_path": row.get("file_path"),
-        "source_path": row.get("source_path"),
-        "doc_id": row.get("doc_id"),
-        "content_hash": row.get("content_hash"),
-        "status": row["status"],
-        "last_modified_time": row.get("last_modified_time"),
-        "uploaded_at": ua.isoformat() if hasattr(ua, "isoformat") else ua,
-    }
-
-
-def _job_public(row) -> dict:
-    """Public projection of a rag_file_metadata row for the job endpoints: the file-index
-    fields plus job bookkeeping. Never emits lightrag_key (JOIN-ONLY, see db.py) or the
-    physical workspace name."""
-    return {
-        **_file_index_row(row),
-        "batch_id": row.get("batch_id"),
-        "attempts": row.get("attempts"),
-        "error": row.get("error"),
-        "description": row.get("description"),
-    }
 
 
 @router.get(
@@ -396,14 +372,22 @@ async def delete_file(body: FileDeleteRequest, ws: dict = Depends(require_worksp
     rag_instance = await server.get_workspace_rag(ws["id"])
     lock = await _get_ws_lock(ws["id"])
     async with lock:
+        if graph_storage_ready():
+            async with graph_transaction(ws):
+                pass
         try:
-            await rag_instance.lightrag.adelete_by_doc_id(doc_id, delete_llm_cache=True)
+            result = await rag_instance.lightrag.adelete_by_doc_id(doc_id, delete_llm_cache=True)
+            if graph_storage_ready() and result.status not in {"success", "not_found"}:
+                raise RuntimeError(f"LightRAG document deletion failed: {result.status}")
         except Exception as exc:
             raise _internal_error(exc, f"delete of doc {doc_id}") from exc
-    # Drop the index row(s) and any leftover raw file.
-    await server._db_pool.execute(
-        "DELETE FROM rag_file_metadata WHERE workspace=$1 AND doc_id=$2", phys, doc_id
-    )
+        sql = "DELETE FROM rag_file_metadata WHERE workspace=$1 AND doc_id=$2"
+        if graph_storage_ready():
+            async with graph_transaction(ws, write=True) as conn:
+                await conn.execute(sql, phys, doc_id)
+                await refresh_extraction(conn, ws)
+        else:
+            await server._db_pool.execute(sql, phys, doc_id)
     if meta and meta.get("job_id") and meta.get("file"):
         _job_path(phys, meta["job_id"], meta["file"]).unlink(missing_ok=True)
     return {"status": "deleted", "doc_id": doc_id}

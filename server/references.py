@@ -236,7 +236,9 @@ async def _build_references(
             "last_modified_time": m.get("last_modified_time") if m else None,
         }
         ua = m.get("uploaded_at") if m else None
-        out["uploaded_at"] = ua.strftime("%Y-%m-%dT%H:%M:%S") if hasattr(ua, "strftime") else ua
+        out["uploaded_at"] = (
+            ua.strftime("%Y-%m-%dT%H:%M:%S") if ua is not None and hasattr(ua, "strftime") else ua
+        )
         out["llm_model_extracted"] = m.get("llm_model_extracted") if m else None
         if answered_model is not None:
             out["llm_model_answered"] = answered_model

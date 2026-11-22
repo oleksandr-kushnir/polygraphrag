@@ -4,33 +4,13 @@ from fastapi import APIRouter, Depends, Query
 from fastapi import Path as PathParam
 from fastapi.responses import HTMLResponse
 
-import server
-from server import config
-from server.deps import _internal_error, require_workspace
+from server.deps import require_workspace
 from server.graph import _build_graph_html
-from server.references import (
-    _build_references,
-    _clean_needles,
-    _path_matches_any,
-    _resolve_block_file_paths,
-    _resolve_graph_paths,
-    _rewrite_answer_refs,
-)
-from server.schemas import QueryDataRequest, QueryRequest, QueryResponse
+from server.graph_viewer import select_viewer_graph
+from server.queries import ask_workspace, search_workspace
+from server.schemas import GraphViewerOptions, QueryDataRequest, QueryRequest, QueryResponse
 
 router = APIRouter()
-
-
-def _query_param(QueryParam, *, mode, include_references=None, top_k=None, chunk_top_k=None):
-    """Build a QueryParam, omitting optional knobs so LightRAG's own defaults apply."""
-    kwargs = {"mode": mode}
-    if include_references is not None:
-        kwargs["include_references"] = include_references
-    if top_k is not None:
-        kwargs["top_k"] = top_k
-    if chunk_top_k is not None:
-        kwargs["chunk_top_k"] = chunk_top_k
-    return QueryParam(**kwargs)
 
 
 @router.post(
@@ -47,30 +27,7 @@ def _query_param(QueryParam, *, mode, include_references=None, top_k=None, chunk
     responses={404: {"description": "Workspace not found or soft-deleted"}},
 )
 async def query(req: QueryRequest, ws: dict = Depends(require_workspace)):
-    rag_instance = await server.get_workspace_rag(ws["id"])
-    try:
-        from lightrag import QueryParam
-
-        raw = await rag_instance.lightrag.aquery_llm(
-            req.query,
-            param=_query_param(
-                QueryParam,
-                mode=req.mode,
-                include_references=req.include_references,
-                top_k=req.top_k,
-            ),
-        )
-    except Exception as exc:
-        raise _internal_error(exc, "query") from exc
-
-    result = (raw.get("llm_response") or {}).get("content", "")
-    raw_refs = (raw.get("data") or {}).get("references")
-    # Build the key→row map even to only rewrite the prose; emit the structured refs when asked.
-    references, meta_map = await _build_references(
-        raw_refs, ws["lightrag_workspace"], answered_model=config.QUERY_LLM_MODEL
-    )
-    result = _rewrite_answer_refs(result, raw_refs, meta_map)
-    return {"result": result, "references": references if req.include_references else []}
+    return await ask_workspace(req, ws)
 
 
 @router.post(
@@ -142,57 +99,7 @@ async def query(req: QueryRequest, ws: dict = Depends(require_workspace)):
     },
 )
 async def query_data(req: QueryDataRequest, ws: dict = Depends(require_workspace)):
-    rag_instance = await server.get_workspace_rag(ws["id"])
-    needles = _clean_needles(req.file_path_contains)  # blank/empty => no filter (all data)
-    # Post-filter runs after retrieval; widen the candidate set so a narrow folder still has hits.
-    top_k = req.top_k * config.RAG_FILTER_TOPK_BOOST if needles else req.top_k
-    chunk_top_k = None if not needles else req.top_k * config.RAG_FILTER_TOPK_BOOST
-    try:
-        from lightrag import QueryParam
-
-        raw = await rag_instance.lightrag.aquery_data(
-            req.query,
-            param=_query_param(QueryParam, mode=req.mode, top_k=top_k, chunk_top_k=chunk_top_k),
-        )
-    except Exception as exc:
-        raise _internal_error(exc, "query/data") from exc
-
-    data = raw.get("data") or {}
-    # Resolve internal LightRAG keys in entity/relationship/chunk file_path -> real Postgres paths
-    # BEFORE filtering, so file_path_contains matches the real path consistently with references.
-    await _resolve_block_file_paths(data, ws["lightrag_workspace"])
-    if needles:
-        data["entities"] = [
-            e
-            for e in (data.get("entities") or [])
-            if _path_matches_any(e.get("file_path"), needles)
-        ]
-        data["relationships"] = [
-            r
-            for r in (data.get("relationships") or [])
-            if _path_matches_any(r.get("file_path"), needles)
-        ]
-        data["chunks"] = [
-            c for c in (data.get("chunks") or []) if _path_matches_any(c.get("file_path"), needles)
-        ]
-    references, _ = (
-        await _build_references(data.get("references"), ws["lightrag_workspace"])
-        if req.include_references
-        else ([], {})
-    )
-    if needles:
-        references = [r for r in references if _path_matches_any(r.get("file_path"), needles)]
-    return {
-        "status": raw.get("status"),
-        "message": raw.get("message"),
-        "data": {
-            "entities": data.get("entities") or [],
-            "relationships": data.get("relationships") or [],
-            "chunks": data.get("chunks") or [],
-            "references": references,
-        },
-        "metadata": raw.get("metadata") or {},
-    }
+    return await search_workspace(req, ws)
 
 
 @router.get(
@@ -251,24 +158,11 @@ async def graph_html(
     ),
     ws: dict = Depends(require_workspace),
 ):
-    rag_instance = await server.get_workspace_rag(ws["id"])
-    needles = _clean_needles(file_path_contains)  # blank/empty => no filter (whole graph)
-    # Post-filter runs after graph selection; widen the fetch so a narrow folder still has nodes.
-    fetch_nodes = max_nodes * config.RAG_FILTER_TOPK_BOOST if needles else max_nodes
-    try:
-        kg = await rag_instance.lightrag.get_knowledge_graph(
-            node_label=node_label,
-            max_depth=max_depth,
-            max_nodes=fetch_nodes,
-        )
-    except Exception as exc:
-        raise _internal_error(exc, "graph.html") from exc
-    # Resolve node + edge file_path (internal keys) -> real Postgres paths before filtering/
-    # rendering, so tooltips never show LightRAG's internal name and the folder filter matches the
-    # real path. Nodes and edges share one fetch.
-    await _resolve_graph_paths(list(kg.nodes) + list(kg.edges), ws["lightrag_workspace"])
-    if needles:
-        kg.nodes = [
-            n for n in kg.nodes if _path_matches_any((n.properties or {}).get("file_path"), needles)
-        ][:max_nodes]  # re-apply the hard cap after the boosted fetch; priority order preserved
-    return HTMLResponse(_build_graph_html(kg, physics))
+    options = GraphViewerOptions(
+        node_label=node_label,
+        max_depth=max_depth,
+        max_nodes=max_nodes,
+        physics=physics,
+        file_path_contains=file_path_contains,
+    )
+    return HTMLResponse(_build_graph_html(await select_viewer_graph(ws, options), physics))
