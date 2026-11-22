@@ -35,7 +35,13 @@ class SearchExpression:
 
     @staticmethod
     def invalid(position: int):
-        raise graph_error(422, "invalid_search", "Invalid Boolean expression", position=position)
+        raise graph_error(
+            422,
+            "invalid_search",
+            "Invalid Boolean expression. Use text for plain words or quote a phrase in q, "
+            'for example "star chart".',
+            position=position,
+        )
 
     def peek(self) -> str:
         return self.tokens[self.pos][0]

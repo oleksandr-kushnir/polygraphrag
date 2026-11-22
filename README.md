@@ -3,7 +3,7 @@
 **Give your AI agents a knowledge graph with one MCP endpoint.** Connect at `/mcp` to search workspace evidence, follow relationships, and show interactive graphs. [Connect an MCP client →](#connect-your-agent-with-mcp)
 
 <p align="center">
-  <img alt="PolyGraphRAG: turning messy multimodal data into production-ready knowledge graphs" src="docs/images/hero.png" width="100%">
+  <img alt="PolyGraphRAG workflow from multimodal ingestion to knowledge graphs and MCP tools" src="docs/images/hero.png" width="100%">
 </p>
 
 **A production FastAPI service for multimodal, multi-project knowledge-graph RAG** — ingest PDFs, Office docs, images, and audio; extract an entity/relationship **knowledge graph**; and query it with dual-level retrieval. Provider-agnostic, backed by **Postgres + pgvector + Apache AGE**.
@@ -28,6 +28,7 @@ Point any **Streamable HTTP** MCP client at **`http://localhost:9622/mcp`**. You
 - **Follow the graph.** Find an entity by name, inspect its source evidence, and traverse the actual relationships. Keyword lookup and traversal work with all model providers disabled.
 - **Show the graph.** Use `show_workspace_graph` to render an interactive graph in an MCP Apps host, export a self-contained HTML file, or return a browser link.
 - **Write facts directly.** Opt in with `MCP_GRAPH_WRITES=true` to insert entities and relationships in one atomic batch or patch records by revision. Manual and extracted facts live in the same graph.
+- **Upload original documents.** Opt in with `MCP_FILE_UPLOADS=true` to send files for background extraction and track each job through MCP. The default limit is 32 MiB per call, with optional gzip for the request. [Upload tool reference](docs/api-reference.md#upload-documents-through-mcp)
 
 The server exposes **12 read tools by default**. Set `API_TOKENS` to require the same bearer authentication as REST. For setup, a runnable client example, and the full catalog, see the [MCP tool reference](docs/api-reference.md#mcp).
 
@@ -56,7 +57,7 @@ The server exposes **12 read tools by default**. Set `API_TOKENS` to require the
 
 ## 🔀🤖 A knowledge backend for workflows and AI agents
 
-**Upload through REST, explore through MCP, and open the same graph in a browser.** A workflow can feed documents from a drive, inbox, or webhook into `POST /workspace/{id}/upload/batch`. PolyGraphRAG handles parsing and extraction in the background. Once the job finishes, an agent can retrieve the evidence through MCP or REST.
+**Upload from a workflow or an MCP client, then explore the same graph in a browser.** A workflow can send documents from a drive, inbox, or webhook to `POST /workspace/{id}/upload/batch`. An MCP client can send files with `upload_documents`. PolyGraphRAG handles parsing and extraction in the background, then agents can retrieve the evidence through MCP or REST.
 
 Give each project its own workspace on a single deployment. Use **Swagger UI** at `/docs` to try the REST endpoints and `/openapi.json` to build typed integrations. If your source system already knows the facts, write them directly and start querying the graph without model credentials. [Manual graph guide](docs/manual-graph-guide.md)
 

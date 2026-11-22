@@ -160,7 +160,12 @@ MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
 # (machines) or via HTTP Basic with the token as the password (browsers). Read live so tests
 # can monkeypatch it, mirroring the _active_llm_cfg() idiom above.
 API_TOKENS = [t.strip() for t in os.getenv("API_TOKENS", "").split(",") if t.strip()]
+GRAPH_VIEWER_ENABLED = os.getenv("GRAPH_VIEWER_ENABLED", "true").strip().lower() == "true"
 MCP_GRAPH_WRITES = os.getenv("MCP_GRAPH_WRITES", "false").strip().lower() == "true"
+MCP_FILE_UPLOADS = os.getenv("MCP_FILE_UPLOADS", "false").strip().lower() == "true"
+MCP_UPLOAD_MAX_BYTES = int(os.getenv("MCP_UPLOAD_MAX_BYTES") or 32 * 1024 * 1024)
+if MCP_UPLOAD_MAX_BYTES <= 0:
+    raise ValueError("MCP_UPLOAD_MAX_BYTES must be positive")
 MCP_VIEWER_BASE_URL = os.getenv("MCP_VIEWER_BASE_URL", "").strip()
 
 # Ingestion-integrity guard: after ainsert returns, confirm LightRAG actually finished

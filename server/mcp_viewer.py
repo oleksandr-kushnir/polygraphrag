@@ -7,9 +7,10 @@ from uuid import uuid4
 from mcp import types
 from pydantic import AnyHttpUrl, AnyUrl, TypeAdapter
 
+from server.deps import require_workspace
 from server.graph import graph_viewer_payload, render_graph_snapshot
 from server.graph_store import graph_error
-from server.graph_viewer import select_viewer_graph
+from server.graph_viewer import require_graph_viewer, select_viewer_graph
 from server.schemas import GraphViewerResult, ShowGraphToolInput
 
 VIEWER_APP_URI = AnyUrl("ui://polygraphrag/graph.html")
@@ -64,8 +65,10 @@ def _result(
 
 
 async def show_workspace_graph(
-    ws: dict, options: ShowGraphToolInput, base_url: str | None
+    options: ShowGraphToolInput, base_url: str | None
 ) -> types.CallToolResult:
+    await require_graph_viewer()
+    ws = await require_workspace(options.workspace_id)
     workspace_id = ws["id"]
     url = _viewer_url(base_url, workspace_id, options)
     too_long = url is not None and len(url.encode("ascii")) > VIEWER_URL_BYTES
@@ -79,7 +82,10 @@ async def show_workspace_graph(
             )
         if url is None:
             raise graph_error(
-                422, "viewer_link_unavailable", 'Request delivery="html" for an offline snapshot.'
+                422,
+                "viewer_link_unavailable",
+                'Set MCP_VIEWER_BASE_URL on the API to enable browser links. Use delivery="html" '
+                "if your client can save an embedded HTML resource.",
             )
         return _result(
             GraphViewerResult(
@@ -103,16 +109,20 @@ async def show_workspace_graph(
             GraphViewerResult(
                 workspace_id=workspace_id, title=title, representation="html", viewer_url=url
             ),
-            f"Save the attached HTML as graph.html to view {workspace_id} offline.",
+            "An HTML snapshot is included as an embedded resource. If your client supports "
+            "saving embedded resources, save it as graph.html to view it offline.",
             resource=resource,
         )
     else:
-        fallback = url or 'Request delivery="html" for an offline snapshot.'
+        fallback = url or (
+            'Request delivery="html" if your client can save an embedded HTML resource.'
+        )
         result = _result(
             GraphViewerResult(
                 workspace_id=workspace_id, title=title, representation="inline", viewer_url=url
             ),
-            f"{title} ({len(graph['nodes'])} nodes, {len(graph['links'])} relationships).\n{fallback}",
+            f"{title} ({len(graph['nodes'])} nodes, {len(graph['links'])} relationships). "
+            f"Interactive rendering requires an MCP Apps host.\n{fallback}",
             graph=graph,
         )
 

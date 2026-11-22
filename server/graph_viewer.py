@@ -4,9 +4,18 @@ import server
 from server import config
 from server.deps import _internal_error
 from server.graph_queries import effective_knowledge_graph
-from server.graph_store import graph_storage_ready
+from server.graph_store import graph_error, graph_storage_ready
 from server.references import _clean_needles, _path_matches_any, _resolve_graph_paths
 from server.schemas import GraphViewerOptions
+
+
+async def require_graph_viewer() -> None:
+    if not config.GRAPH_VIEWER_ENABLED:
+        raise graph_error(
+            403,
+            "graph_viewer_disabled",
+            "Graph viewing is disabled by server configuration (GRAPH_VIEWER_ENABLED=false).",
+        )
 
 
 async def select_viewer_graph(ws: dict, options: GraphViewerOptions):

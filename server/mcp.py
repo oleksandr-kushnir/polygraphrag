@@ -10,12 +10,17 @@ from fastapi import HTTPException
 from mcp import McpError, types
 from mcp.server.lowlevel import Server
 from mcp.server.lowlevel.helper_types import ReadResourceContents
-from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from mcp.server.streamable_http_manager import (
+    DEFAULT_MAX_REQUEST_BODY_SIZE,
+    StreamableHTTPSessionManager,
+)
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import AnyUrl, BaseModel, ValidationError
+from starlette.requests import ClientDisconnect, Request
 from starlette.types import Receive, Scope, Send
 
 from server import config
+from server.compression import decode_gzip_request
 from server.deps import require_workspace
 from server.graph import graph_app_html
 from server.graph_operations import (
@@ -29,6 +34,7 @@ from server.graph_operations import (
 )
 from server.graph_store import graph_error
 from server.jobs import lookup_ingest_job
+from server.mcp_uploads import base64_length, upload_documents
 from server.mcp_viewer import (
     VIEWER_APP_MIME,
     VIEWER_APP_URI,
@@ -62,6 +68,8 @@ from server.schemas import (
     RetrieveGraphToolInput,
     SearchWorkspaceInput,
     ShowGraphToolInput,
+    UploadDocumentsInput,
+    UploadDocumentsResult,
     WorkspaceListResponse,
     WorkspaceOverview,
     WorkspaceToolInput,
@@ -159,7 +167,7 @@ def _workspace_tool(
     return _tool(name, description, input_model, output_model, in_workspace, write=write, ui=ui)
 
 
-def _catalog(viewer_base_url: str | None, writes: bool) -> dict[str, _Tool]:
+def _catalog(viewer_base_url: str | None, writes: bool, uploads: bool) -> dict[str, _Tool]:
     tools = [
         _tool(
             "list_workspaces",
@@ -170,7 +178,9 @@ def _catalog(viewer_base_url: str | None, writes: bool) -> dict[str, _Tool]:
         ),
         _workspace_tool(
             "search_workspace",
-            "Retrieve entities, relationships, text chunks and sources to compose your own answer.",
+            "Search a corpus with a natural-language query and return graph and document evidence. "
+            "Requires embeddings. For provider-free graph keyword search, use find_graph_entities "
+            "or retrieve_graph.",
             SearchWorkspaceInput,
             None,
             lambda ws, args: search_workspace(args, ws),
@@ -198,8 +208,9 @@ def _catalog(viewer_base_url: str | None, writes: bool) -> dict[str, _Tool]:
         ),
         _workspace_tool(
             "find_graph_entities",
-            "Find graph entities by label, type, origin or search expression. Pass next_cursor "
-            "with the same filters to continue. Keyword mode works without providers.",
+            "Find graph entities by label, type, origin, or keywords. Use text for plain words and "
+            "q for Boolean expressions. Pass next_cursor with the same filters to continue. "
+            "Keyword mode works without providers.",
             FindEntitiesToolInput,
             EntityPage,
             find_graph_entities,
@@ -227,8 +238,9 @@ def _catalog(viewer_base_url: str | None, writes: bool) -> dict[str, _Tool]:
         ),
         _workspace_tool(
             "retrieve_graph",
-            "Find ranked entity or relationship seeds and return their bounded graph and sources. "
-            "Supply q or text. Semantic and hybrid modes require text and embeddings.",
+            "Find ranked entities or relationships and return their bounded graph and sources. "
+            "Use text for plain words or a phrase and q for Boolean expressions. "
+            "Semantic and hybrid modes require text and embeddings.",
             RetrieveGraphToolInput,
             GraphRetrieval,
             lambda ws, args: retrieve_graph(args, ws),
@@ -240,13 +252,14 @@ def _catalog(viewer_base_url: str | None, writes: bool) -> dict[str, _Tool]:
             EmbeddingConsistency,
             lambda ws, _: get_embedding_consistency(ws),
         ),
-        _workspace_tool(
+        _tool(
             "show_workspace_graph",
-            "Show the interactive graph in a compatible host. Use html for an offline snapshot "
-            "or link for the live REST viewer when a browser URL is configured.",
+            "Get the workspace graph. For a browser link or text-only chat, use delivery=link "
+            "and share viewer_url. Use auto to render in an MCP Apps host or html when the client "
+            "can save embedded HTML resources.",
             ShowGraphToolInput,
             GraphViewerResult,
-            lambda ws, args: show_workspace_graph(ws, args, viewer_base_url),
+            lambda args: show_workspace_graph(args, viewer_base_url),
             ui=True,
         ),
     ]
@@ -282,6 +295,19 @@ def _catalog(viewer_base_url: str | None, writes: bool) -> dict[str, _Tool]:
                 ),
             ]
         )
+    if uploads:
+        tools.append(
+            _workspace_tool(
+                "upload_documents",
+                "Upload original files for background extraction. Supply standard base64 using the "
+                f"client and keep the decoded total within {config.MCP_UPLOAD_MAX_BYTES} bytes. "
+                "Check each returned job ID with get_ingest_job.",
+                UploadDocumentsInput,
+                UploadDocumentsResult,
+                upload_documents,
+                write=True,
+            )
+        )
     return {tool.definition.name: tool for tool in tools}
 
 
@@ -305,7 +331,11 @@ def _tool_error(status: int, detail: dict | str) -> types.CallToolResult:
 
 def create_session_manager() -> StreamableHTTPSessionManager:
     viewer_base_url = validate_viewer_base_url(config.MCP_VIEWER_BASE_URL)
-    catalog = _catalog(viewer_base_url, config.MCP_GRAPH_WRITES)
+    catalog = _catalog(viewer_base_url, config.MCP_GRAPH_WRITES, config.MCP_FILE_UPLOADS)
+    request_limit = DEFAULT_MAX_REQUEST_BODY_SIZE
+    if config.MCP_FILE_UPLOADS:
+        # Reserve space for bounded file metadata and the JSON-RPC envelope.
+        request_limit = max(request_limit, base64_length(config.MCP_UPLOAD_MAX_BYTES) + 1024 * 1024)
     app: Server = Server("PolyGraphRAG")
 
     @app.list_tools()
@@ -345,6 +375,7 @@ def create_session_manager() -> StreamableHTTPSessionManager:
         app=app,
         stateless=True,
         json_response=True,
+        max_request_body_size=request_limit,
         security_settings=TransportSecuritySettings(
             allowed_hosts=["polygraphrag:9622", "localhost:*", "127.0.0.1:*", "[::1]:*"],
             allowed_origins=[
@@ -361,4 +392,21 @@ class MCPTransport:
     """Serve the exact /mcp route with the session manager for this app lifespan."""
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        await scope["app"].state.mcp_manager.handle_request(scope, receive, send)
+        manager: StreamableHTTPSessionManager = scope["app"].state.mcp_manager
+        request = Request(scope, receive)
+        encoding = ",".join(request.headers.getlist("content-encoding")).strip().lower()
+        if encoding == "gzip":
+            try:
+                scope, receive = await decode_gzip_request(request, manager.max_request_body_size)
+            except ClientDisconnect:
+                return
+        elif encoding not in ("", "identity"):
+            raise HTTPException(
+                415,
+                {
+                    "code": "unsupported_content_encoding",
+                    "message": "Send the MCP request using gzip or identity encoding.",
+                },
+                headers={"Accept-Encoding": "gzip, identity"},
+            )
+        await manager.handle_request(scope, receive, send)

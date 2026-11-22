@@ -1948,6 +1948,66 @@ def _extract_js_blob(html: str, var: str, terminator: str):
     return json.loads(m.group(1))
 
 
+async def test_graph_html_preserves_relationship_direction(client, monkeypatch):
+    kg = SimpleNamespace(
+        nodes=[SimpleNamespace(id=id_, labels=[], properties={}) for id_ in ("a", "b", "c")],
+        edges=[
+            SimpleNamespace(source="a", target="b", properties={"direction": "directed"}),
+            SimpleNamespace(source="b", target="c", properties={"direction": "undirected"}),
+            SimpleNamespace(source="c", target="a", properties={}),
+        ],
+    )
+    monkeypatch.setattr(rag_stub.lightrag, "get_knowledge_graph", AsyncMock(return_value=kg))
+
+    response = await client.get(f"{WS}/graph.html")
+
+    assert response.status_code == 200
+    links = _extract_js_blob(response.text, "DATA", "const PHYSICS")["links"]
+    assert [(link["source"], link["target"], link["direction"]) for link in links] == [
+        ("a", "b", "directed"),
+        ("b", "c", "undirected"),
+        ("c", "a", "undirected"),
+    ]
+
+
+async def test_graph_html_organizes_evidence_and_record_details(client, monkeypatch):
+    kg = SimpleNamespace(
+        nodes=[SimpleNamespace(id=id_, labels=["Artifact"], properties={}) for id_ in ("a", "b")],
+        edges=[
+            SimpleNamespace(
+                source="a",
+                target="b",
+                properties={
+                    "id": "stored-at",
+                    "type": "stored at",
+                    "description": "Stored in the cabinet.<SEP>Verified by the custodian.",
+                    "file_path": "ledger.md<SEP>register.md",
+                    "origins": ["manual", "extracted"],
+                    "revision": 2,
+                    "sources": [
+                        {"file_path": "ledger.md", "document_id": "doc-1", "chunk_id": "chunk-2"},
+                        {"source_ref": "Custodian's note"},
+                    ],
+                },
+            ),
+        ],
+    )
+    monkeypatch.setattr(rag_stub.lightrag, "get_knowledge_graph", AsyncMock(return_value=kg))
+
+    response = await client.get(f"{WS}/graph.html")
+
+    assert response.status_code == 200
+    data = _extract_js_blob(response.text, "DATA", "const PHYSICS")
+    assert data["nodes"][0]["tooltip"] == {"type": "Artifact"}
+    assert data["links"][0]["tooltip"] == {
+        "type": "stored at",
+        "description": "Stored in the cabinet.\n\nVerified by the custodian.",
+        "evidence": ["ledger.md", "register.md", "Custodian's note"],
+        "metadata": {"Origin": "Manual, Extracted", "Revision": 2},
+        "technical": {"Record ID": "stored-at", "Document IDs": "doc-1", "Chunk IDs": "chunk-2"},
+    }
+
+
 @pytest.mark.asyncio
 async def test_graph_html_legend_matches_node_colors(client):
     """The bottom-right legend lists every entity type once, and each swatch color is exactly the

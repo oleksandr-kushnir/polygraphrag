@@ -27,6 +27,7 @@ _VISION_SUFFIXES = {".pdf", ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".
 _AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".opus", ".webm"}
 _OFFICE_SUFFIXES = {".docx", ".xlsx", ".pptx"}
 _TEXT_SUFFIXES = {".txt", ".md", ".html", ".csv"}
+SUPPORTED_DOCUMENT_SUFFIXES = _VISION_SUFFIXES | _AUDIO_SUFFIXES | _OFFICE_SUFFIXES | _TEXT_SUFFIXES
 
 
 def ingestion_roles(suffix: str) -> tuple[str, ...]:

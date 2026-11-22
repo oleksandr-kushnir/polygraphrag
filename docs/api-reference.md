@@ -91,7 +91,10 @@ asyncio.run(main())
 
 The two corpus query tools accept the same `mode`, `top_k` and `include_references` settings as REST.
 Graph ID lookup, keyword search, traversal, the viewer and the consistency report work with model
-providers disabled. Use `retrieve_graph` in keyword mode for provider-free retrieval.
+providers disabled. Use `find_graph_entities` for entity lookup or `retrieve_graph` for a
+subgraph with sources. In keyword mode, send plain terms or phrases in `text`. Use `q` for
+Boolean expressions with uppercase `AND` and `OR` and double quotes around phrases, such as
+`"star chart" AND locker`.
 An MCP tool error carries `isError: true`. Domain errors include JSON text with `status`, `code`
 and `message`, plus public details such as the current revision for a conflict. HTTP authentication
 failures return `401` before tool discovery or execution.
@@ -113,17 +116,59 @@ Use a stable caller-owned ID for each new record. Batch writes are atomic. Patch
 fields and accept null for clearing `source_ref`. On `revision_conflict`, reread the record before
 retrying. See the [manual graph guide](manual-graph-guide.md) for examples and provenance.
 
+### Upload documents through MCP
+
+Set `MCP_FILE_UPLOADS=true` and recreate the API container to expose `upload_documents`. It accepts
+the original bytes of up to eight supported files as standard base64. The client should encode the
+files directly. The tool uses the same extraction worker and provider settings as the REST upload.
+
+```json
+{
+  "workspace_id": "default",
+  "files": [
+    {
+      "filename": "notes.txt",
+      "content_base64": "SGVsbG8sIHdvcmxkIQo=",
+      "source_path": "archive/notes.txt"
+    }
+  ]
+}
+```
+
+Per-file metadata also accepts `description`, `path_root`, and `last_modified_time`. The tool
+returns a `batch_id` and per-file results. Poll `get_ingest_job` with the workspace and each
+`job_id` until the status is `done` or `failed`. A `save_failed` entry means the file was
+never queued and has no job ID.
+
+The default decoded limit is **32 MiB (33,554,432 bytes) per call**, shared by all files in the
+call. A single file can use the full allowance. Set `MCP_UPLOAD_MAX_BYTES` to change it. The
+JSON body is larger before gzip, and the client, reverse proxy, or extraction provider may impose
+its own limits. For a larger upload, split a batch across calls or use the
+[multipart REST endpoint](#post-workspaceiduploadbatch).
+
+Clients that implement gzip requests can compress the entire MCP JSON-RPC body and send
+`Content-Encoding: gzip` with `Content-Type: application/json`. Plain JSON also works. Both the
+compressed and inflated JSON sizes are bounded for gzip requests, and gzip leaves the decoded
+file limit unchanged. `Accept-Encoding` controls response compression independently.
+
 ### Graph viewer delivery
 
 `show_workspace_graph` accepts `node_label`, `max_depth`, `max_nodes`, `physics` and
 `file_path_contains` with the same defaults as the REST viewer.
+
+With `GRAPH_VIEWER_ENABLED=false`, `show_workspace_graph` stays discoverable and returns
+`isError: true` for every delivery mode. The error has `status: 403` and code
+`graph_viewer_disabled`, with a message identifying the setting that disabled it.
 
 - `delivery="auto"` (default) returns a summary and the graph data for MCP Apps hosts. For
   text clients, the summary includes a browser link when configured or explains how to request HTML.
 - `delivery="html"` returns the complete self-contained HTML as an embedded `text/html` resource
   which clients can save as `graph.html`.
 - `delivery="link"` returns the live REST viewer URL. Set `MCP_VIEWER_BASE_URL` to an address the
-  user's browser can reach. The browser authenticates separately through the usual REST mechanism.
+  user's browser can reach. In local Docker Compose, for example, set it to `http://localhost:9622`
+  or use the port you publish with `RAG_PORT`, then recreate the API container. For text-only chat,
+  ask the agent to use `delivery="link"` and share the returned `viewer_url`. The browser
+  authenticates separately through the usual REST mechanism.
 
 Inline and HTML deliveries allow up to 5000 nodes and 1 MiB for the uncompressed MCP tool result.
 If the inline result is too large, the tool can return a configured link. Narrow the filters or
@@ -381,6 +426,12 @@ Useful for building your own UI, debugging retrieval, or feeding another pipelin
 
 ### `GET /workspace/{id}/graph.html`
 Returns a self-contained interactive HTML page (built with [D3.js v7](https://d3js.org/), force layout drawn on an HTML canvas, D3 inlined) rendering the workspace's knowledge graph — open it directly in a browser. Supports optional filtering by file-path substring so you can focus on one folder's subgraph.
+
+Hover a node or relationship to see its description and evidence. Click to pin the panel and
+expand **Technical details** for record and provenance IDs.
+
+With `GRAPH_VIEWER_ENABLED=false`, this endpoint returns HTTP `403` with JSON containing
+`detail.code: graph_viewer_disabled` and a `detail.message` explaining the configuration.
 
 Query parameters:
 

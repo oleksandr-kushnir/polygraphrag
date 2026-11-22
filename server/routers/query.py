@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse
 
 from server.deps import require_workspace
 from server.graph import _build_graph_html
-from server.graph_viewer import select_viewer_graph
+from server.graph_viewer import require_graph_viewer, select_viewer_graph
 from server.queries import ask_workspace, search_workspace
 from server.schemas import GraphViewerOptions, QueryDataRequest, QueryRequest, QueryResponse
 
@@ -105,12 +105,14 @@ async def query_data(req: QueryDataRequest, ws: dict = Depends(require_workspace
 @router.get(
     "/workspace/{workspace_id}/graph.html",
     response_class=HTMLResponse,
+    dependencies=[Depends(require_graph_viewer)],
     summary="Render this workspace's knowledge graph as an interactive HTML page",
     description=(
         "Returns a **self-contained, offline-capable HTML page** (D3.js v7 inlined, drawn on "
         "an HTML canvas) showing the workspace's LightRAG knowledge graph as an interactive "
         "force-directed diagram. Nodes are entities (colored by entity type, sized by their connection "
-        "degree); edges are relationships. Hover a node or edge to see its full properties.\n\n"
+        "degree); edges are relationships. Hover a node or edge for a summary or click it to pin "
+        "its details and inspect record IDs.\n\n"
         "Open the URL directly in a browser, or save the response body to a `.html` file. "
         "This returns rendered HTML, **not** JSON — for machine-readable graph data use "
         "`POST /workspace/{workspace_id}/query/data` instead.\n\n"
@@ -124,6 +126,10 @@ async def query_data(req: QueryDataRequest, ws: dict = Depends(require_workspace
     ),
     responses={
         200: {"content": {"text/html": {}}, "description": "Interactive graph HTML page"},
+        403: {
+            "content": {"application/json": {}},
+            "description": "Graph viewer disabled by server configuration (graph_viewer_disabled)",
+        },
         404: {"description": "Workspace not found or soft-deleted"},
     },
 )

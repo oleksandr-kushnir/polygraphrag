@@ -1,9 +1,12 @@
-"""Negotiate gzip for buffered JSON and HTML responses."""
+"""Negotiate gzip responses and decode bounded gzip request bodies."""
 
 import re
+import zlib
 
+from fastapi import HTTPException
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.middleware.gzip import GZipMiddleware
+from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -11,6 +14,54 @@ _MINIMUM_SIZE = 1024
 _CODING = re.compile(
     r"(gzip|identity|\*)\s*(?:;\s*q\s*=\s*(0(?:\.\d{0,3})?|1(?:\.0{0,3})?))?", re.I
 )
+
+
+async def decode_gzip_request(request: Request, limit: int) -> tuple[Scope, Receive]:
+    """Inflate a single gzip member and replay it to the ASGI JSON handler."""
+    body = bytearray()
+    wire_bytes = 0
+    decoder = zlib.decompressobj(wbits=31)
+    too_large = HTTPException(
+        413,
+        {
+            "code": "mcp_request_too_large",
+            "message": f"The gzip request exceeds the MCP body limit of {limit} bytes.",
+            "limit_bytes": limit,
+        },
+    )
+    invalid = HTTPException(
+        400, {"code": "invalid_gzip_request", "message": "Send one complete gzip member."}
+    )
+    try:
+        async for chunk in request.stream():
+            wire_bytes += len(chunk)
+            if wire_bytes > limit:
+                raise too_large
+            body.extend(decoder.decompress(chunk, limit - len(body) + 1))
+            if len(body) > limit:
+                raise too_large
+            if decoder.unused_data:
+                raise invalid
+    except zlib.error as exc:
+        raise invalid from exc
+    if not decoder.eof:
+        raise invalid
+
+    scope = {**request.scope, "headers": list(request.scope["headers"])}
+    headers = MutableHeaders(scope=scope)
+    del headers["content-encoding"]
+    headers["content-length"] = str(len(body))
+    decoded: bytes | None = bytes(body)
+    body.clear()
+
+    async def receive() -> Message:
+        nonlocal decoded
+        if decoded is None:
+            return await request.receive()
+        chunk, decoded = decoded, None
+        return {"type": "http.request", "body": chunk, "more_body": False}
+
+    return scope, receive
 
 
 def _qualities(headers: Headers) -> tuple[float, float]:

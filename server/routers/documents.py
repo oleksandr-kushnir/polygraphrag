@@ -6,22 +6,15 @@ package at call time (server._db_pool, server.get_workspace_rag, …) so the tes
 those names are honoured; stateless helpers import directly from their owning modules.
 """
 
-import hashlib
 import json
-import uuid
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi import Path as PathParam
 
 import server
-from server.db import _db_insert_job
 from server.deps import _batch_response, _internal_error, require_workspace
 from server.graph_store import graph_storage_ready, graph_transaction, refresh_extraction
-from server.ingest import _build_metadata, _join_path, ingestion_roles
 from server.jobs import _file_index_row, _job_public, lookup_ingest_job
-from server.providers import require_providers
-from server.references import _safe_ref_name
 from server.schemas import (
     BatchResponse,
     FileDeleteRequest,
@@ -30,6 +23,7 @@ from server.schemas import (
     JobRecord,
     JobsResponse,
 )
+from server.uploads import enqueue_uploads
 from server.worker import _job_path
 from server.workspaces import _get_ws_lock
 
@@ -107,17 +101,6 @@ async def upload_batch(
     files: list[UploadFile] = File(...),
     ws: dict = Depends(require_workspace),
 ):
-    if graph_storage_ready():
-        require_providers(
-            "upload.batch",
-            *dict.fromkeys(
-                role
-                for file in files
-                for role in ingestion_roles(Path(file.filename or "").suffix.lower())
-            ),
-        )
-    pub = ws["id"]  # public id → routes the worker to the right instance
-    phys = ws["lightrag_workspace"]  # physical workspace → storage namespace + metadata tag
     form = await request.form()
     metadata_field = form.get("metadata", "[]")
     if hasattr(metadata_field, "read"):
@@ -144,74 +127,7 @@ async def upload_batch(
                 normalized.append({})
         else:
             normalized.append({})
-    meta_list = normalized
-    batch_id = uuid.uuid4().hex[:8]
-    entries = []
-    for i, file in enumerate(files):
-        job_id = uuid.uuid4().hex[:8]
-        filename = file.filename or "upload"
-        dest = _job_path(phys, job_id, filename)
-        m = meta_list[i] if i < len(meta_list) else {}
-        description = m.get("description", "") or ""
-        source_path = m.get("source_path", "") or ""
-        last_modified = m.get("last_modified_time", "") or ""
-        path_root = m.get("path_root", "") or ""
-        try:
-            raw = await file.read()
-            with dest.open("wb") as fh:
-                fh.write(raw)
-            content_hash = hashlib.sha256(raw).hexdigest()
-            # Two distinct identities per file:
-            #  - lightrag_input: what we hand LightRAG. `{job_id}_{basename}` is unique and
-            #    slash-free, so LightRAG's basename canonicalization can't drop the job_id and
-            #    keys never collide. (Read back as `lightrag_key` after ingest; JOIN-ONLY.)
-            #  - display_path: the REAL, openable path shown in references/`/files` — the caller's
-            #    path_root/source_path join when given, else source_path, else the plain filename.
-            #    Never the on-disk `{job_id}_` token.
-            lightrag_input = f"{job_id}_{_safe_ref_name(filename)}"
-            display_path = (
-                _join_path(path_root, source_path)
-                if (path_root and source_path)
-                else (source_path or _safe_ref_name(filename))
-            )
-            description_text = _build_metadata(description, source_path, last_modified)
-            record: dict = {
-                "job_id": job_id,
-                "file": file.filename,
-                "workspace": phys,
-                "status": "pending",
-                "attempts": 0,
-                "error": None,
-                "batch_id": batch_id,
-                "content_hash": content_hash,
-                "file_path": display_path,
-            }
-            server._jobs[job_id] = record
-            entries.append(record)
-            if server._db_pool:
-                await _db_insert_job(
-                    server._db_pool,
-                    record,
-                    description,
-                    source_path,
-                    last_modified,
-                    content_hash=content_hash,
-                    file_path=display_path,
-                    lightrag_key=lightrag_input,
-                )
-            await server._job_queue.put((pub, job_id, dest, description_text, lightrag_input))
-        except Exception as exc:
-            entries.append(
-                {
-                    "file": file.filename,
-                    "workspace": phys,
-                    "status": "save_failed",
-                    "error": str(exc),
-                    "batch_id": batch_id,
-                }
-            )
-    server._batches[batch_id] = entries
-    return _batch_response(batch_id, entries)
+    return await enqueue_uploads(ws, files, normalized)
 
 
 @router.get(

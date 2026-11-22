@@ -91,7 +91,10 @@ services:
       # the service; machines use `Authorization: Bearer <token>`, browsers use Basic
       # (any username + token as password). Every endpoint except /health is gated.
       API_TOKENS: ${API_TOKENS:-}
+      GRAPH_VIEWER_ENABLED: ${GRAPH_VIEWER_ENABLED:-true}
       MCP_GRAPH_WRITES: ${MCP_GRAPH_WRITES:-false}
+      MCP_FILE_UPLOADS: ${MCP_FILE_UPLOADS:-false}
+      MCP_UPLOAD_MAX_BYTES: ${MCP_UPLOAD_MAX_BYTES:-33554432}
       MCP_VIEWER_BASE_URL: ${MCP_VIEWER_BASE_URL:-}
     volumes:
       - ragdata:/app/data

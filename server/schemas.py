@@ -95,6 +95,10 @@ IndexKind = Literal["entity", "relationship", "chunk"]
 SearchMode = Literal["keyword", "semantic", "hybrid"]
 GraphOrigin = Literal["manual", "extracted"]
 Direction = Literal["in", "out", "both"]
+_BOOLEAN_QUERY_DESC = (
+    'Boolean expression with uppercase AND/OR. Quote phrases, as in "star chart" AND locker. '
+    "Use text for plain keyword search."
+)
 
 
 class GraphWrite(BaseModel, extra="forbid"):
@@ -210,8 +214,8 @@ class EntityFilters(BaseModel, extra="forbid"):
     type: GraphLabel | None = None
     origin: GraphOrigin | None = None
     sort: Literal["degree"] | None = None
-    q: str | None = Field(None, max_length=2000)
-    text: GraphLabel | None = None
+    q: str | None = Field(None, max_length=2000, description=_BOOLEAN_QUERY_DESC)
+    text: GraphLabel | None = Field(None, description="Plain words or a phrase to search for.")
     mode: SearchMode = "keyword"
     limit: int = Field(50, ge=1, le=200)
     cursor: str | None = Field(None, max_length=512)
@@ -268,7 +272,13 @@ class NeighborsToolInput(NeighborOptions, EntityToolInput):
 
 
 class ShowGraphToolInput(GraphViewerOptions, WorkspaceToolInput):
-    delivery: Literal["auto", "html", "link"] = "auto"
+    delivery: Literal["auto", "html", "link"] = Field(
+        "auto",
+        description=(
+            "Use link for a browser URL or text chat, auto for an MCP Apps host, and html "
+            "for clients that can save an embedded HTML resource."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_node_limit(self):
@@ -278,8 +288,8 @@ class ShowGraphToolInput(GraphViewerOptions, WorkspaceToolInput):
 
 
 class GraphRetrieve(BaseModel, extra="forbid"):
-    q: str | None = Field(None, max_length=2000)
-    text: GraphLabel | None = None
+    q: str | None = Field(None, max_length=2000, description=_BOOLEAN_QUERY_DESC)
+    text: GraphLabel | None = Field(None, description="Plain words or a phrase to search for.")
     mode: SearchMode = "keyword"
     seed_kind: GraphKind = "entity"
     seed_limit: int = Field(5, ge=1, le=50)
@@ -455,6 +465,35 @@ class IngestJobStatus(BaseModel):
     job_id: str
     status: JobStatus
     attempts: int | None = None
+
+
+class DocumentUpload(BaseModel, extra="forbid"):
+    filename: str = Field(description="Original basename including the file extension.")
+    content_base64: str = Field(
+        description="Standard base64 of the original file bytes, supplied by the client.",
+        json_schema_extra={"contentEncoding": "base64"},
+    )
+    description: str = Field("", max_length=2000)
+    source_path: str = Field("", max_length=2000)
+    path_root: str = Field("", max_length=2000)
+    last_modified_time: str = Field("", max_length=64)
+
+
+class UploadDocumentsInput(WorkspaceToolInput):
+    files: list[DocumentUpload] = Field(min_length=1, description="Up to eight files per call.")
+
+
+class UploadedDocumentJob(BaseModel):
+    job_id: str | None = None
+    file: str
+    file_path: str | None = None
+    status: JobStatus
+
+
+class UploadDocumentsResult(BaseModel):
+    batch_id: str
+    summary: dict[str, int]
+    jobs: list[UploadedDocumentJob]
 
 
 class HealthResponse(BaseModel):

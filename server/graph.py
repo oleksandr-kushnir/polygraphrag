@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 
+from server.references import _graph_field_sep
+
 # Stable categorical palette (CSS color strings). Entity types are mapped to colors
 # deterministically by sorted type name, so a given type keeps its color across renders.
 _GRAPH_PALETTE = [
@@ -50,44 +52,61 @@ def _node_entity_type(node) -> str:
     return "unknown"
 
 
-# Show the most useful fields first; any remaining (non-empty) fields follow in insertion order.
-_TOOLTIP_KEY_ORDER = [
-    "entity_type",
-    "description",
-    "keywords",
-    "weight",
-    "file_path",
-    "source_id",
-    "created_at",
-]
-
-
 def _format_tooltip_value(key: str, value) -> str:
-    """Stringify a property value for display; render epoch timestamps as readable UTC datetimes."""
+    """Format timestamps and cap long text for display."""
     if key.endswith("_at") and isinstance(value, (int, float)) and value > 0:
         return datetime.fromtimestamp(value, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    text = str(value)
+    text = str(value).strip()
     if len(text) > 800:
         text = text[:800] + "…"
     return text
 
 
-def _props_tooltip(props: dict) -> str:
-    """Render node/edge properties as well-formatted multi-line plain text (one 'Key: value' per
-    line). Empty values are dropped (removes LightRAG's empty `truncate` artifact); keys are
-    title-cased; known fields are ordered first. The page styles the tooltip <div> with
-    `white-space: pre-wrap` so these newlines render."""
-    props = props or {}
-    ordered_keys = [k for k in _TOOLTIP_KEY_ORDER if k in props]
-    ordered_keys += [k for k in props if k not in _TOOLTIP_KEY_ORDER]
-    lines = []
-    for k in ordered_keys:
-        v = props[k]
-        if v is None or str(v).strip() == "":
-            continue
-        label = k.replace("_", " ").title()
-        lines.append(f"{label}: {_format_tooltip_value(k, v)}")
-    return "\n".join(lines)
+def _props_tooltip(props: dict, sep: str) -> dict:
+    """Project graph properties into readable summary, evidence, and technical details."""
+    sources = [source for source in props.get("sources") or [] if isinstance(source, dict)]
+    evidence = (props.get("file_path") or "").split(sep)
+    for source in sources:
+        evidence.extend(source.get(field) or "" for field in ("file_path", "source_ref"))
+    evidence = list(dict.fromkeys(value.strip() for value in evidence if value.strip()))
+    info: dict = {}
+    description = _format_tooltip_value(
+        "description", str(props.get("description") or "").replace(sep, "\n\n")
+    )
+    if description:
+        info["description"] = description
+    if evidence:
+        info["evidence"] = evidence
+
+    created = props.get("created_at")
+    metadata = {
+        "Origin": ", ".join(origin.capitalize() for origin in props.get("origins") or []),
+        "Created": _format_tooltip_value("created_at", created) if created is not None else None,
+        "Revision": props.get("revision"),
+    }
+    metadata = {label: value for label, value in metadata.items() if value not in (None, "")}
+    if metadata:
+        info["metadata"] = metadata
+
+    technical = {}
+    for key, label in (
+        ("id", "Record ID"),
+        ("requested_id", "Requested ID"),
+        ("keywords", "Keywords"),
+        ("weight", "Weight"),
+        ("source_id", "Source IDs"),
+    ):
+        if props.get(key) is not None:
+            value = _format_tooltip_value(key, props[key]).replace(sep, "\n")
+            if value:
+                technical[label] = value
+    for key, label in (("document_id", "Document IDs"), ("chunk_id", "Chunk IDs")):
+        ids = dict.fromkeys(source[key] for source in sources if source.get(key))
+        if ids:
+            technical[label] = _format_tooltip_value(key, "\n".join(ids))
+    if technical:
+        info["technical"] = technical
+    return info
 
 
 # Standalone exports and the MCP App use the same D3 renderer.
@@ -103,21 +122,76 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   #graph:active { cursor: grabbing; }
   #tooltip {
     position: fixed;
-    display: none;
-    pointer-events: none;
-    z-index: 10;
-    white-space: pre-wrap;
-    max-width: 380px;
-    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    font-size: 12px;
-    line-height: 1.45;
-    padding: 8px 11px;
-    border-radius: 6px;
-    background-color: #2b2b2b;
-    color: #eaeaea;
-    border: 1px solid #555;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.45);
+    z-index: 20;
+    box-sizing: border-box;
+    width: min(360px, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
+    overflow: auto;
+    overflow-wrap: anywhere;
+    font: 13px/1.5 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    padding: 15px 16px;
+    border-radius: 10px;
+    background: #23262b;
+    color: #f0f2f5;
+    border: 1px solid #454a53;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
   }
+  #tooltip:not(.pinned) { pointer-events: none; }
+  #tooltip.pinned { top: 12px; right: 12px; }
+  #tooltip header { position: relative; }
+  #tooltip.pinned header { padding-right: 36px; }
+  #tooltip h2, #tooltip h3, #tooltip p, #tooltip dl, #tooltip dd { margin: 0; }
+  #tooltip h2 { font-size: 17px; line-height: 1.3; }
+  #tooltip .info-category {
+    color: #b8c4d4;
+    font-size: 11px;
+    font-weight: 650;
+    letter-spacing: .055em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  #tooltip .info-close {
+    position: absolute; top: 0; right: 0;
+    width: 28px; height: 28px;
+    padding: 0; border: 1px solid #505965; border-radius: 6px;
+    background: transparent; color: inherit; font-size: 18px; cursor: pointer;
+  }
+  #tooltip .info-close:hover { background: #363d48; }
+  #tooltip button:focus-visible, #tooltip summary:focus-visible {
+    outline: 2px solid #a9caff; outline-offset: 2px;
+  }
+  #tooltip .info-endpoints {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    align-items: center;
+    gap: 9px;
+    padding: 8px 10px;
+    background: #2e3540;
+    border-radius: 6px;
+    font-weight: 600;
+  }
+  #tooltip .info-endpoints span:nth-child(2) { color: #bbc9db; }
+  #tooltip .info-endpoints span:last-child { text-align: right; }
+  #tooltip .info-endpoints, #tooltip .info-description, #tooltip section { margin-top: 12px; }
+  #tooltip .info-description { white-space: pre-line; }
+  #tooltip:not(.pinned) .info-description {
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden;
+  }
+  #tooltip h3 { color: #c5cfdb; font-size: 12px; font-weight: 650; }
+  #tooltip ul { margin: 4px 0 0; padding-left: 17px; }
+  #tooltip li + li { margin-top: 3px; }
+  #tooltip dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; }
+  #tooltip dt { color: #bbc5d3; }
+  #tooltip .info-metadata, #tooltip details {
+    margin-top: 11px;
+    border-top: 1px solid #454a53;
+    padding-top: 9px;
+    font-size: 12px;
+  }
+  #tooltip .info-technical { margin-top: 7px; }
+  #tooltip .info-technical dd { white-space: pre-wrap; font: 11px/1.5 ui-monospace, monospace; }
+  #tooltip summary { color: #c5cfdb; cursor: pointer; }
+  #tooltip .info-more { margin-top: 4px; color: #b8c4d4; font-size: 12px; }
   #hint {
     position: fixed; bottom: 10px; left: 12px; z-index: 10;
     font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -150,8 +224,8 @@ __EXTRA_STYLE__
 </head>
 <body>
 <canvas id="graph"></canvas>
-<div id="tooltip"></div>
-<div id="hint">scroll to zoom · drag background to pan · drag a node to move it · hover for details</div>
+<aside id="tooltip" aria-label="Graph details" hidden></aside>
+<div id="hint">Scroll to zoom · Drag to pan or move a node · Hover for details · Click to pin</div>
 <div id="legend"></div>
 __STATUS__
 <script>__D3_SOURCE__</script>
@@ -226,7 +300,7 @@ function renderGraph(DATA, PHYSICS, LEGEND) {
     ctx.translate(transform.x, transform.y);
     ctx.scale(transform.k, transform.k);
 
-    // Edges (directed): line + arrowhead at the target boundary.
+    // Draw each edge and add a target arrowhead for directed relationships.
     ctx.lineWidth = 1;
     ctx.strokeStyle = "rgba(180,180,180,0.35)";
     ctx.fillStyle = "rgba(180,180,180,0.55)";
@@ -242,7 +316,7 @@ function renderGraph(DATA, PHYSICS, LEGEND) {
       ctx.moveTo(s.x, s.y);
       ctx.lineTo(ex, ey);
       ctx.stroke();
-      // Arrowhead
+      if (l.direction !== "directed") continue;
       const a = 5, spread = 0.5;
       ctx.beginPath();
       ctx.moveTo(ex, ey);
@@ -308,20 +382,127 @@ function renderGraph(DATA, PHYSICS, LEGEND) {
     return null;
   }
 
-  canvas.addEventListener("mousemove", (event) => {
-    const rect = canvas.getBoundingClientRect();
-    const mx = event.clientX - rect.left, my = event.clientY - rect.top;
-    const hit = nodeAt(mx, my) || linkAt(mx, my);
-    if (hit && hit.tooltip) {
-      tooltip.textContent = hit.tooltip;
-      tooltip.style.display = "block";
-      tooltip.style.left = (event.clientX + 12) + "px";
-      tooltip.style.top = (event.clientY + 12) + "px";
-    } else {
-      tooltip.style.display = "none";
+  let inspected;
+  let pinned = false;
+
+  function itemAt(event) {
+    return nodeAt(event.offsetX, event.offsetY) || linkAt(event.offsetX, event.offsetY);
+  }
+
+  function textElement(tag, value, className = "") {
+    const element = document.createElement(tag);
+    element.textContent = value;
+    element.className = className;
+    return element;
+  }
+
+  function appendFields(list, fields) {
+    for (const [label, value] of Object.entries(fields)) {
+      list.append(textElement("dt", label), textElement("dd", value));
     }
+  }
+
+  function hideDetails() {
+    inspected = undefined;
+    pinned = false;
+    tooltip.hidden = true;
+    tooltip.replaceChildren();
+  }
+
+  function showDetails(item) {
+    inspected = item;
+    const info = item.tooltip || {};
+    const isLink = Boolean(item.source);
+    const directed = item.direction === "directed";
+    const category = isLink ? (directed ? "Directed relationship" : "Undirected relationship")
+      : (info.type && info.type !== "unknown" ? info.type : "Entity");
+    const title = isLink ? (info.type || "Relationship") : item.label;
+    const header = document.createElement("header");
+    header.append(textElement("p", category, "info-category"), textElement("h2", title));
+    tooltip.replaceChildren(header);
+    tooltip.hidden = false;
+    tooltip.classList.toggle("pinned", pinned);
+    tooltip.scrollTop = 0;
+
+    if (isLink) {
+      const endpoints = document.createElement("p");
+      endpoints.className = "info-endpoints";
+      const connector = textElement("span", directed ? "→" : "—");
+      connector.setAttribute("aria-label", directed ? "to" : "connected to");
+      endpoints.append(textElement("span", item.source.label), connector,
+        textElement("span", item.target.label));
+      tooltip.append(endpoints);
+    }
+    if (info.description) tooltip.append(textElement("p", info.description, "info-description"));
+    if (info.evidence?.length) {
+      const section = document.createElement("section");
+      const list = document.createElement("ul");
+      const visible = pinned ? info.evidence : info.evidence.slice(0, 3);
+      for (const source of visible) list.append(textElement("li", source));
+      section.append(textElement("h3", "Evidence"), list);
+      const remaining = info.evidence.length - visible.length;
+      if (remaining) section.append(textElement("p", `+ ${remaining} more`, "info-more"));
+      tooltip.append(section);
+    }
+    if (info.metadata) {
+      const list = document.createElement("dl");
+      list.className = "info-metadata";
+      appendFields(list, info.metadata);
+      tooltip.append(list);
+    }
+    if (pinned) {
+      tooltip.style.removeProperty("left");
+      tooltip.style.removeProperty("top");
+      const details = document.createElement("details");
+      const list = document.createElement("dl");
+      list.className = "info-technical";
+      const fields = { ...info.technical };
+      if (isLink) {
+        fields["Endpoint ID 1"] = item.source.id;
+        fields["Endpoint ID 2"] = item.target.id;
+      } else {
+        fields["Record ID"] ??= item.id;
+      }
+      appendFields(list, fields);
+      details.append(textElement("summary", "Technical details"), list);
+      tooltip.append(details);
+      const close = textElement("button", "×", "info-close");
+      close.type = "button";
+      close.setAttribute("aria-label", "Close graph details");
+      close.addEventListener("click", hideDetails);
+      header.append(close);
+      close.focus({ preventScroll: true });
+    }
+  }
+
+  canvas.addEventListener("mousemove", (event) => {
+    if (pinned) return;
+    const item = itemAt(event);
+    if (!item) {
+      if (inspected) hideDetails();
+      return;
+    }
+    if (item !== inspected) showDetails(item);
+    const gap = 12;
+    const { offsetWidth: cardWidth, offsetHeight: cardHeight } = tooltip;
+    const x = event.clientX + gap + cardWidth <= width - gap ? event.clientX + gap
+      : Math.max(gap, event.clientX - gap - cardWidth);
+    tooltip.style.left = x + "px";
+    tooltip.style.top = Math.max(gap, Math.min(event.clientY + gap, height - gap - cardHeight)) + "px";
   }, listening);
-  canvas.addEventListener("mouseleave", () => { tooltip.style.display = "none"; }, listening);
+  canvas.addEventListener("mouseleave", () => { if (!pinned) hideDetails(); }, listening);
+  canvas.addEventListener("click", (event) => {
+    const item = itemAt(event);
+    if (!item) {
+      hideDetails();
+      return;
+    }
+    pinned = true;
+    showDetails(item);
+  }, listening);
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") hideDetails();
+  }, listening);
 
   // --- Zoom / pan (background) ---
   d3.select(canvas).call(
@@ -339,26 +520,33 @@ function renderGraph(DATA, PHYSICS, LEGEND) {
   // --- Node dragging ---
   d3.select(canvas).call(
     d3.drag()
-      .subject((event) => nodeAt(event.x, event.y))
+      .subject((event) => {
+        const node = nodeAt(event.x, event.y);
+        if (!node) return null;
+        const [x, y] = transform.apply([node.x, node.y]);
+        return {node, x, y};
+      })
       .on("start", (event) => {
-        if (!event.subject) return;
+        const {node} = event.subject;
+        node.fx = node.x;
+        node.fy = node.y;
         if (PHYSICS) simulation.alphaTarget(0.3).restart();
-        const [gx, gy] = transform.invert([event.x, event.y]);
-        event.subject.fx = gx;
-        event.subject.fy = gy;
       })
       .on("drag", (event) => {
-        if (!event.subject) return;
+        const {node} = event.subject;
         const [gx, gy] = transform.invert([event.x, event.y]);
-        event.subject.fx = gx;
-        event.subject.fy = gy;
-        if (!PHYSICS) draw();
+        node.fx = gx;
+        node.fy = gy;
+        if (!PHYSICS) {
+          node.x = gx;
+          node.y = gy;
+          draw();
+        }
       })
       .on("end", (event) => {
-        if (!event.subject) return;
         if (PHYSICS) simulation.alphaTarget(0);
-        event.subject.fx = null;
-        event.subject.fy = null;
+        event.subject.node.fx = null;
+        event.subject.node.fy = null;
       })
   );
 
@@ -377,7 +565,7 @@ function renderGraph(DATA, PHYSICS, LEGEND) {
     simulation.stop();
     d3.select(canvas).on(".zoom", null).on(".drag", null).property("__zoom", null);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    tooltip.style.display = "none";
+    hideDetails();
     legend.replaceChildren();
     legend.style.display = "none";
   };
@@ -391,6 +579,7 @@ __INITIALIZE__
 
 def graph_viewer_payload(kg, physics: bool) -> dict:
     """Project the selected graph into the shared canvas renderer's input."""
+    sep = _graph_field_sep()
     # Degree from the edge list (undirected count — both endpoints).
     degree: dict[str, int] = {}
     for e in kg.edges:
@@ -411,7 +600,7 @@ def graph_viewer_payload(kg, physics: bool) -> dict:
                 "label": str(props.get("entity_id") or n.id),
                 "color": color_of[et],
                 "degree": degree.get(n.id, 0),
-                "tooltip": _props_tooltip({"entity_type": et, **props}),
+                "tooltip": {"type": et, **_props_tooltip(props, sep)},
             }
         )
 
@@ -420,11 +609,13 @@ def graph_viewer_payload(kg, physics: bool) -> dict:
     for e in kg.edges:
         # Guard against edges referencing nodes trimmed by max_nodes truncation.
         if e.source in node_ids and e.target in node_ids:
+            props = e.properties or {}
             links.append(
                 {
                     "source": e.source,
                     "target": e.target,
-                    "tooltip": _props_tooltip(e.properties or {}),
+                    "direction": props.get("direction") or "undirected",
+                    "tooltip": {"type": props.get("type") or "", **_props_tooltip(props, sep)},
                 }
             )
 

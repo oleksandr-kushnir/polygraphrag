@@ -100,7 +100,10 @@ Changing the model, dimension, endpoint or deployment identity creates a new emb
 
 | Variable | Default | Notes |
 |---|---|---|
+| `GRAPH_VIEWER_ENABLED` | `true` | Set to `false` to disable `graph.html` and all `show_workspace_graph` delivery modes. Graph data and editing APIs remain available according to their own settings. |
 | `MCP_GRAPH_WRITES` | `false` | Set to `true` to make three graph write tools available to MCP clients with API access. |
+| `MCP_FILE_UPLOADS` | `false` | Set to `true` to let MCP clients with API access upload files for extraction. |
+| `MCP_UPLOAD_MAX_BYTES` | `33554432` (32 MiB) | Maximum total decoded file bytes per MCP upload call. When uploads are enabled, the MCP request body limit is the greater of the SDK's 4 MiB default and the base64 length plus 1 MiB for metadata and framing. |
 | `MCP_VIEWER_BASE_URL` | _(empty)_ | Browser-facing HTTP(S) base URL for viewer links, with an optional deployment path prefix. Leave empty to use inline or standalone HTML delivery. |
 
 MCP is available on the API port at `/mcp` and shares the REST authentication settings.

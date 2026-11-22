@@ -18,6 +18,7 @@ run fast with no container, DB, or API keys. The live-container equivalent is
 import asyncio
 import base64
 import gzip
+import hashlib
 import io
 import json
 import sys
@@ -71,12 +72,14 @@ WRITE_TOOLS = {"write_graph_batch", "patch_graph_entity", "patch_graph_relations
 
 
 @asynccontextmanager
-async def _mcp_client():
+async def _mcp_client(headers=None):
     manager = server.create_session_manager()
     server.app.state.mcp_manager = manager
     async with (
         manager.run(),
-        AsyncClient(transport=ASGITransport(app=server.app), base_url=MCP_URL) as http,
+        AsyncClient(
+            transport=ASGITransport(app=server.app), base_url=MCP_URL, headers=headers
+        ) as http,
         streamable_http_client(f"{MCP_URL}/mcp", http_client=http) as (reader, writer, _),
         ClientSession(reader, writer) as agent,
     ):
@@ -371,6 +374,164 @@ async def test_mcp_ingest_job_is_workspace_scoped_and_omits_private_error(monkey
             assert _mcp_error(failure)["code"] == "job_not_found"
 
 
+async def test_mcp_upload_uses_shared_ingestion_and_citation_path(monkeypatch, tmp_path, client):
+    monkeypatch.setattr(config, "MCP_FILE_UPLOADS", True)
+    monkeypatch.setattr(config, "MCP_GRAPH_WRITES", False)
+    monkeypatch.setattr(config, "MCP_UPLOAD_MAX_BYTES", 1024)
+    monkeypatch.setattr(server, "WORKING_DIR", str(tmp_path))
+    monkeypatch.setattr(server, "API_TOKENS", ["agent-token"])
+    raw_file = b"x" * 1024
+    file = {
+        "filename": "field-notes.MD",
+        "content_base64": base64.b64encode(raw_file).decode(),
+        "source_path": "journals/field-notes.MD",
+        "path_root": "https://example.org/archives",
+    }
+    args = {"workspace_id": "alex", "files": [file]}
+    async with _mcp_client({"Authorization": "Bearer agent-token"}) as (http, agent):
+        tools = {t.name: t for t in (await agent.list_tools()).tools}
+        assert set(tools) == READ_TOOLS | {"upload_documents"}
+        definition = tools["upload_documents"]
+        assert definition.annotations.readOnlyHint is False
+        assert "1024 bytes" in definition.description
+        denied = await http.post(
+            "/mcp",
+            json=_mcp_request("tools/call", name="upload_documents", arguments=args),
+            headers=MCP_HEADERS | {"Authorization": ""},
+        )
+        assert denied.status_code == 401
+        assert server._job_queue.empty()
+
+        result = await agent.call_tool("upload_documents", args)
+        assert not result.isError
+        batch = result.structuredContent
+        assert batch["summary"] == {"pending": 1, "total": 1}
+        job = batch["jobs"][0]
+        job_args = {"workspace_id": "alex", "job_id": job["job_id"]}
+        assert job["file_path"] == "https://example.org/archives/journals/field-notes.MD"
+        assert job["status"] == "pending"
+        assert file["content_base64"] not in result.model_dump_json()
+        assert next(tmp_path.rglob("*.MD")).read_bytes() == raw_file
+        rest = (await http.get(f"{WS}/batch/{batch['batch_id']}")).json()["jobs"][0]
+        assert rest["job_id"] == job["job_id"]
+        assert rest["content_hash"] == hashlib.sha256(raw_file).hexdigest()
+        await _drain_queue(process_result=("doc-1", "key-1"))
+        tracked = await agent.call_tool("get_ingest_job", job_args)
+        assert tracked.structuredContent == {
+            "job_id": job["job_id"],
+            "status": "done",
+            "attempts": 0,
+        }
+        denied = await agent.call_tool("get_ingest_job", job_args | {"workspace_id": "other"})
+        assert _mcp_error(denied)["code"] == "job_not_found"
+
+
+async def test_mcp_upload_limits_and_disabled_catalog(monkeypatch, tmp_path, client):
+    monkeypatch.setattr(config, "MCP_FILE_UPLOADS", False)
+    monkeypatch.setattr(config, "MCP_UPLOAD_MAX_BYTES", 1024)
+    monkeypatch.setattr(server, "WORKING_DIR", str(tmp_path))
+
+    def document(size=1, **fields):
+        return {
+            "filename": "example.txt",
+            "content_base64": base64.b64encode(b"a" * size).decode(),
+        } | fields
+
+    async with _mcp_client() as (_, agent):
+        assert "upload_documents" not in {t.name for t in (await agent.list_tools()).tools}
+        result = await agent.call_tool(
+            "upload_documents", {"workspace_id": "alex", "files": [document()]}
+        )
+        assert _mcp_error(result)["code"] == "unknown_tool"
+
+    monkeypatch.setattr(config, "MCP_FILE_UPLOADS", True)
+    async with _mcp_client() as (_, agent):
+        for files, code in (
+            ([document(1025)], "document_upload_too_large"),
+            ([document(999), document(26)], "document_upload_too_large"),
+            ([document(2048)], "document_upload_too_large"),
+            ([document()] * 9, "too_many_documents"),
+            ([document(0)], "empty_document"),
+            ([document(), document(content_base64="bad!")], "invalid_document_base64"),
+            ([document(filename="../other.txt")], "invalid_document_filename"),
+            ([document(filename="backup.zip")], "unsupported_document_type"),
+        ):
+            result = await agent.call_tool(
+                "upload_documents", {"workspace_id": "alex", "files": files}
+            )
+            error = _mcp_error(result)
+            assert error["code"] == code
+            if error["status"] == 413:
+                assert error["limit_bytes"] == 1024
+    assert not server._jobs and server._job_queue.empty() and not list(tmp_path.iterdir())
+
+
+async def test_mcp_upload_reports_only_persisted_jobs(monkeypatch, tmp_path, client):
+    monkeypatch.setattr(config, "MCP_FILE_UPLOADS", True)
+    monkeypatch.setattr(server, "WORKING_DIR", str(tmp_path))
+    server._db_pool = SimpleNamespace(
+        execute=AsyncMock(side_effect=[RuntimeError("internal database error"), None])
+    )
+    files = [
+        {"filename": name, "content_base64": "aGVsbG8="} for name in ("failed.txt", "queued.txt")
+    ]
+    async with _mcp_client() as (_, agent):
+        result = await agent.call_tool("upload_documents", {"workspace_id": "alex", "files": files})
+    assert not result.isError
+    jobs = result.structuredContent["jobs"]
+    assert jobs[0]["status"] == "save_failed" and jobs[0]["job_id"] is None
+    assert jobs[1]["status"] == "pending" and jobs[1]["job_id"] in server._jobs
+    assert set(server._jobs) == {jobs[1]["job_id"]}
+    assert server._job_queue.qsize() == 1
+    assert [p.name for p in tmp_path.rglob("*.txt")] == [f"{jobs[1]['job_id']}_queued.txt"]
+    assert "internal database error" not in result.model_dump_json()
+
+
+async def test_mcp_gzip_upload_and_transport_errors(monkeypatch, tmp_path, client):
+    monkeypatch.setattr(config, "MCP_FILE_UPLOADS", True)
+    monkeypatch.setattr(config, "MCP_UPLOAD_MAX_BYTES", 4 * 1024 * 1024)
+    monkeypatch.setattr(server, "WORKING_DIR", str(tmp_path))
+    raw_file = b"t" * (4 * 1024 * 1024)
+    args = {
+        "workspace_id": "alex",
+        "files": [{"filename": "notes.txt", "content_base64": base64.b64encode(raw_file).decode()}],
+    }
+    request = _mcp_request("tools/call", name="upload_documents", arguments=args)
+    compressed = gzip.compress(json.dumps(request).encode())
+
+    async with _mcp_client() as (http, agent):
+        headers = MCP_HEADERS | {
+            "Content-Type": "application/json",
+            "Content-Encoding": "gzip",
+            "Accept-Encoding": "identity",
+        }
+        for wire, encoding, status, code in (
+            (b"malformed", "gzip", 400, "invalid_gzip_request"),
+            (compressed[:-1], "gzip", 400, "invalid_gzip_request"),
+            (compressed + compressed, "gzip", 400, "invalid_gzip_request"),
+            (compressed, "br", 415, "unsupported_content_encoding"),
+            (gzip.compress(b" " * (7 * 1024 * 1024)), "gzip", 413, "mcp_request_too_large"),
+        ):
+            response = await http.post(
+                "/mcp", headers=headers | {"Content-Encoding": encoding}, content=wire
+            )
+            assert response.status_code == status
+            assert response.json()["detail"]["code"] == code
+        assert server._job_queue.empty()
+
+        async def chunks():
+            for pos in range(0, len(compressed), 7):
+                yield compressed[pos : pos + 7]
+
+        response = await http.post("/mcp", headers=headers, content=chunks())
+        assert response.status_code == 200
+        assert "Content-Encoding" not in response.headers
+        job_id = response.json()["result"]["structuredContent"]["jobs"][0]["job_id"]
+        assert (tmp_path / "alex" / f"{job_id}_notes.txt").read_bytes() == raw_file
+        job = await agent.call_tool("get_ingest_job", {"workspace_id": "alex", "job_id": job_id})
+        assert job.structuredContent["status"] == "pending"
+
+
 async def test_mcp_writes_flat_patch_contract_and_auth(monkeypatch, client):
     monkeypatch.setattr(config, "MCP_GRAPH_WRITES", True)
     monkeypatch.setattr(server, "API_TOKENS", ["agent-token"])
@@ -448,6 +609,38 @@ async def test_mcp_writes_flat_patch_contract_and_auth(monkeypatch, client):
                 }
 
 
+async def test_disabled_graph_viewer_reports_configuration_in_rest_and_mcp(monkeypatch, client):
+    monkeypatch.setattr(config, "GRAPH_VIEWER_ENABLED", False)
+    monkeypatch.setattr(config, "MCP_VIEWER_BASE_URL", "https://example.org/rag")
+
+    async with _mcp_client() as (http, agent):
+        assert "show_workspace_graph" in {tool.name for tool in (await agent.list_tools()).tools}
+        with monkeypatch.context() as disabled:
+            lookup = AsyncMock(side_effect=AssertionError("Viewer should skip workspace lookup"))
+            disabled.setattr(server.workspaces, "_lookup_workspace", lookup)
+            rest = await http.get(f"{WS}/graph.html")
+            assert rest.status_code == 403
+            detail = rest.json()["detail"]
+            assert detail["code"] == "graph_viewer_disabled"
+            assert "GRAPH_VIEWER_ENABLED=false" in detail["message"]
+
+            for delivery in ("auto", "html", "link"):
+                result = await agent.call_tool(
+                    "show_workspace_graph", {"workspace_id": "alex", "delivery": delivery}
+                )
+                assert _mcp_error(result) == {"status": 403, **detail}
+                assert len(result.content) == 1
+                assert result.structuredContent is None
+                assert result.meta is None
+            lookup.assert_not_awaited()
+
+        search = {"query": "refunds"}
+        evidence = await agent.call_tool("search_workspace", {"workspace_id": "alex", **search})
+        rest_search = await http.post(f"{WS}/query/data", json=search)
+        assert not evidence.isError and rest_search.status_code == 200
+        assert evidence.structuredContent == rest_search.json()
+
+
 def _viewer_fixture():
     return SimpleNamespace(
         nodes=[
@@ -512,10 +705,13 @@ async def test_mcp_graph_app_modes_and_rest_snapshot_parity(monkeypatch, client,
         assert with_app.json()["result"] == plain.model_dump(by_alias=True, exclude_none=True)
         assert plain.meta["polygraphrag/graph"]["nodes"][0]["label"] == "Original </script>"
         assert len(plain.content) == 1
+        assert "Interactive rendering requires an MCP Apps host" in plain.content[0].text
+        assert linked.structuredContent["viewer_url"] in plain.content[0].text
 
         html = await agent.call_tool("show_workspace_graph", args | {"delivery": "html"})
         rest = await http.get(f"{WS}/graph.html", params=url.query)
         assert html.meta is None
+        assert "If your client supports saving embedded resources" in html.content[0].text
         assert html.content[1].resource.mimeType == "text/html"
         assert html.content[1].resource.text == rest.text
         assert "Original <\\/script>" in rest.text
@@ -575,7 +771,9 @@ async def test_graph_result_budget_measures_uncompressed_serialized_result(monke
         link = await agent.call_tool(
             "show_workspace_graph", {"workspace_id": "alex", "delivery": "link"}
         )
-        assert _mcp_error(link)["code"] == "viewer_link_unavailable"
+        error = _mcp_error(link)
+        assert error["code"] == "viewer_link_unavailable"
+        assert "MCP_VIEWER_BASE_URL" in error["message"]
 
         args = {"workspace_id": "alex", "delivery": "html"}
         minimal = await agent.call_tool("show_workspace_graph", args)
